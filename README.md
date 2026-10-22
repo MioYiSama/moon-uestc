@@ -1,10 +1,10 @@
 # moon-uestc
 
-「晚安成电」学生端 Python SDK。Python 3.13+，同步 `httpx2` 客户端，Pydantic 请求/响应模型，包含 `py.typed`。只覆盖学生端及学生身份下的班委功能，不含辅导员、学院、校级管理接口。
+「晚安成电」学生端 Python 与 Go SDK。Python 3.13+，同步 `httpx2` 客户端，Pydantic 请求/响应模型，包含 `py.typed`；Go 1.23+，只用标准库，见 [`go-sdk/`](go-sdk/README.md)。两者都只覆盖学生端及学生身份下的班委功能，不含辅导员、学院、校级管理接口。
 
 契约来自 Chrome 中部署的 H5 前端及本人账号的只读响应，不是官方公开 API。逆向日期：2026-10-22。前端未引用的后台接口不在覆盖范围内。
 
-## 安装与只读使用
+## Python SDK 安装与只读使用
 
 在项目目录执行：
 
@@ -45,6 +45,42 @@ with MoonClient(session=os.environ["MOON_SESSION"]) as client:
 ```
 
 所有 JSON 接口返回 `APIResponse[T]`，业务失败直接抛异常；成功后 `.data` 是已校验的领域类型，分页元信息保留在 `.page`。`download_avatar()` 返回原始 `bytes`。客户端持有连接池，使用 `with` 或显式 `close()` 关闭。
+
+## Go SDK
+
+`go-sdk/` 是独立 Go module，Go 1.23+，只使用标准库。方法、路径、SESSION、操作票据和错误映射与 Python 版本一致。当前 module 路径为 `moon-uestc/go-sdk`，发布前应改成实际仓库地址；详见 [go-sdk/README.md](go-sdk/README.md)。
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+
+    moonuestc "moon-uestc/go-sdk"
+)
+
+func main() {
+    client, err := moonuestc.NewClient(moonuestc.Options{
+        Session: os.Getenv("MOON_SESSION"),
+    })
+    if err != nil {
+        panic(err)
+    }
+    defer client.CloseIdleConnections()
+
+    record, err := client.Student.Today(context.Background())
+    if err != nil {
+        panic(err)
+    }
+    if record.Data != nil {
+        fmt.Println(record.Data.BusinessDate, record.Data.RecordStatusCode)
+    }
+}
+```
+
+Go 版本使用 `context.Context`，通过 `errors.As` 区分 `AuthenticationError`、`AuthorizationError`、`CheckinTicketError` 和 `ProtocolError`。`Date`、`DateTime`、`Int64` 和联系人列表都按真实响应边界处理；写入同样不会自动重试。
 
 ## 认证与授权
 
@@ -160,3 +196,5 @@ uv run python -m unittest discover -s tests -v
 ```
 
 严格类型检查通过，发布接口的类型完整性检查为 100%；14 个回归测试通过，覆盖认证/授权业务码、票据前置条件、非 2xx 票据错误、不重试提交、重定向不泄露凭据、空记录与坏记录、JSON 内嵌联系人、大整数分页、三态历史筛选、坐标边界及本地时间格式。另用本地 HTTP 服务运行了打卡、填报、诊断日志协议，验证 Cookie、票据、序列化、无 data 成功响应及 HTTP 403 错误映射。`uv build` 可生成 wheel 和源码包，wheel 包含类型标记。真实打卡授权仍需官方小程序有效票据；这里的写操作验证不代表线上提交成功。
+
+Go SDK 另通过 `gofmt`、`go vet`、24 个本地测试和 `go test -race`，并针对真实服务验证了匿名 SESSION 缺失会返回 `AuthenticationError(code=5000)`。Go 客户端没有用真实 SESSION 重跑已认证读取，也没有线上提交写入；这部分沿用 Python 的线上只读结果和本地 HTTP 写入协议验证。Go 测试命令见 [go-sdk/README.md](go-sdk/README.md)。

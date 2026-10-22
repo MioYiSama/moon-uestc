@@ -1,0 +1,27 @@
+[project]
+name = "moon-uestc"
+version = "0.1.0"
+description = "Typed Python SDK for the UESTC student daily check-in APIs"
+readme = "README.md"
+authors = [
+    { name = "MioYiSama", email = "mioyisama@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "httpx2>=2.16.0",
+    "pydantic>=2.14.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+include = ["src", "tests"]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+]

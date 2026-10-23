@@ -44,11 +44,11 @@ with MoonClient(session=os.environ["MOON_SESSION"]) as client:
     keywords = client.student.case_keywords(LocationType.CAMPUS).data
 ```
 
-所有 JSON 接口返回 `APIResponse[T]`，业务失败直接抛异常；成功后 `.data` 是已校验的领域类型，分页元信息保留在 `.page`。`download_avatar()` 返回原始 `bytes`。客户端持有连接池，使用 `with` 或显式 `close()` 关闭。
+普通 JSON 接口返回 `APIResponse[T]`，业务失败直接抛异常；成功后 `.data` 是已校验的领域类型，分页元信息保留在 `.page`。`download_avatar()` 返回原始 `bytes`；复合认证方法 `auth.exchange_session()` 直接返回 `CASSession`。客户端持有连接池，使用 `with` 或显式 `close()` 关闭。
 
 ## Go SDK
 
-`go-sdk/` 是独立 Go module，Go 1.23+，只使用标准库。方法、路径、SESSION、操作票据和错误映射与 Python 版本一致。当前 module 路径为 `moon-uestc/go-sdk`，发布前应改成实际仓库地址；详见 [go-sdk/README.md](go-sdk/README.md)。
+`go-sdk/` 是独立 Go module，Go 1.23+，只使用标准库。学生业务方法、路径、SESSION、操作票据和错误映射与 Python 版本一致；显式 CAS 换 SESSION 方法目前仅 Python 支持。当前 module 路径为 `moon-uestc/go-sdk`，发布前应改成实际仓库地址；详见 [go-sdk/README.md](go-sdk/README.md)。
 
 ```go
 package main
@@ -86,14 +86,56 @@ Go 版本使用 `context.Context`，通过 `errors.As` 区分 `AuthenticationErr
 
 ### 登录身份：SESSION
 
-当前部署已实测使用服务端 `SESSION` Cookie。只带该 Cookie 的 Python 请求可以正常读取学生数据，不依赖浏览器 UA、地图 API Key 或 `appId=294`。SDK 按前端惯例发送 `platform: h5`，不自动跟随重定向。
+当前部署已实测使用服务端 `SESSION` Cookie。只带该 Cookie 的 Python 请求可以正常读取学生数据，不依赖浏览器 UA、地图 API Key 或 `appId=294`。SDK 按前端惯例发送 `platform: h5`，普通业务请求不自动跟随重定向。
 
 - 无 Cookie 的 `auth/user-info` 返回 HTTP 200、业务码 `5000`，提示“未登录或会话已失效”，SDK 将其转换为 `AuthenticationError`。
 - 实测登录响应的 `accessToken` 和 `refreshToken` 都是 `NOT_IN_USE`，不是可用的 Bearer 凭据。
 - 前端另有 `userData.token` → `Authorization: Bearer ...` 分支。SDK 提供可选 `bearer_token` 参数，但当前会话没有该 token，未验证 Bearer 单独认证。
 - 前端入口可读取 URL 查询参数 `sessionId`，传给 `auth/user-info`。对应 `client.auth.user_info(session_id=...)`；未取得有效入口样本，未验证其换取会话的行为。
-- 学生前端未发现密码登录、刷新 token 或延长会话的接口。失效后应从官方入口重新登录，再更新 Cookie；SDK 不自动续期。
+- 学生前端未发现密码登录或刷新 token 的接口。Python SDK 支持下述显式 CAS 换 SESSION 流程，但不自动续期、不提交账号密码，也不代替官方二次认证。
 - 当前观察到 `SESSION` 的 HttpOnly 为 true、Secure 为 false。始终使用 HTTPS，勿把会话传给第三方、日志或公开下载链接。
+
+### 显式换取新的 SESSION（Python）
+
+`client.auth.exchange_session(castgc=..., browser_fingerprint=..., user_agent=...) -> CASSession` 使用你自己仍有效的统一认证会话换取新 SESSION，不要求已有打卡 SESSION。
+
+两项 Cookie 都来自 `idas.uestc.edu.cn`：`CASTGC` 的路径为 `/authserver`，`MULTIFACTOR_BROWSER_FINGERPRINT` 的路径为 `/`。`user_agent` 使用对应登录浏览器的实际值。仅有 Cookie 不代表它仍有效；实测仅带 CASTGC，即使 UA 相同，也可能进入二次认证页。
+
+```python
+import os
+
+from moon_uestc import MoonClient, ReauthenticationRequiredError
+
+try:
+    with MoonClient() as bootstrap:
+        exchanged = bootstrap.auth.exchange_session(
+            castgc=os.environ["MOON_CASTGC"],
+            browser_fingerprint=os.environ["MOON_BROWSER_FINGERPRINT"],
+            user_agent=os.environ["MOON_USER_AGENT"],
+        )
+except ReauthenticationRequiredError:
+    raise SystemExit("请先在官方页面完成登录或二次认证")
+
+# session 是 SecretStr，MoonClient 可直接接收，无需转成明文。
+with MoonClient(session=exchanged.session) as client:
+    record = client.student.today().data
+
+# 后续再次换取时，使用服务端可能已轮换的新凭据，而非一直复用原值：
+next_credentials = exchanged.credentials
+```
+
+返回类型从 `moon_uestc.models` 导入：
+
+- `CASSession.session: SecretStr`：新 SESSION。
+- `CASSession.user_info: UserInfo`：使用新会话读取并校验后的身份，不是当前客户端原身份的副本。
+- `CASSession.credentials: CASCredentials`：响应 Cookie 更新后的 `castgc`、`browser_fingerprint`（均为 SecretStr），以及 `user_agent`。再次调用时传入这些值；SDK 不自动持久化凭据。常规 repr 和 JSON 序列化会遮蔽 SecretStr，确实需要明文时才显式调用 `get_secret_value()`。
+
+方法使用独立连接池和 Cookie jar，顺序为 CAS `/authserver/login?service=https%3A%2F%2Fjzsz.uestc.edu.cn%2F` → Ticket 回调下发 SESSION → `/api/isLoginFailure` 确认 `status=true, code=200, data=true` → 打卡 `/api/auth/user-info` 验证身份。新 Cookie 直接访问打卡接口曾返回 5000，因此保留平台登录检查步骤。
+
+只有换会话流程允许最多 8 次重定向，目标限于 HTTPS 的 `idas.uestc.edu.cn` 和客户端配置的业务 origin；拒绝 URL 用户凭据、额外域名和认证域 HTTP 降级。普通学生 API 仍不跟随重定向。当前客户端的 SESSION、Bearer 和打卡票据不会发送给 CAS；SSO Cookie 不发送给业务域。高级调用方可传独立的 `transport` 参数控制本次换会话的 HTTP transport，它不复用业务客户端的 transport。
+
+成功与失败都不修改当前 `MoonClient`：调用方自行用返回的 SESSION 创建新客户端；打卡票据不会自动迁移。停在官方登录或二次认证页时抛 `ReauthenticationRequiredError`（`AuthenticationError` 子类）；平台未确认登录也抛该异常。换会话的 CAS/平台登录请求发生网络或 HTTP 失败时抛 `AuthenticationError`，不在消息中暴露带 Ticket 的跳转 URL。返回结构不符或非法跳转为 `ProtocolError`。本方法不是延长旧 SESSION，也不保证会话或 SSO Cookie 的剩余寿命。
+
 
 ### 打卡与情况填报：独立操作票据
 
@@ -172,7 +214,7 @@ except AuthorizationError as error:
     print("当前身份没有权限", error.code)
 ```
 
-`CheckinTicketError` 是 `AuthorizationError` 的子类；其它业务错误为 `APIError`。操作票据业务码优先识别，包括 HTTP 403 中的票据错误；其余 HTTP 401/403 分别映射为认证/授权异常。其它非成功 HTTP 响应保留 `httpx2.HTTPStatusError`，网络错误保留 `httpx2` 原始异常。重定向、登录 HTML 和不匹配的响应契约为 `ProtocolError`。SDK 不重试，不吞掉错误，也不在错误消息中附带请求 Cookie、票据或完整响应正文。
+`CheckinTicketError` 是 `AuthorizationError` 的子类；其它业务错误为 `APIError`。操作票据业务码优先识别，包括 HTTP 403 中的票据错误；其余 HTTP 401/403 分别映射为认证/授权异常。普通业务请求的其它非成功 HTTP 响应保留 `httpx2.HTTPStatusError`，网络错误保留 `httpx2` 原始异常；重定向、登录 HTML 和不匹配的响应契约为 `ProtocolError`。显式 CAS 换会话的方法采用上节单独说明的跳转和错误规则。SDK 不重试，不吞掉错误，也不在错误消息中附带请求 Cookie、票据或完整响应正文。
 
 ## 逆向依据与验证
 
@@ -195,6 +237,10 @@ uv run pyright --verifytypes moon_uestc --ignoreexternal
 uv run python -m unittest discover -s tests -v
 ```
 
-严格类型检查通过，发布接口的类型完整性检查为 100%；14 个回归测试通过，覆盖认证/授权业务码、票据前置条件、非 2xx 票据错误、不重试提交、重定向不泄露凭据、空记录与坏记录、JSON 内嵌联系人、大整数分页、三态历史筛选、坐标边界及本地时间格式。另用本地 HTTP 服务运行了打卡、填报、诊断日志协议，验证 Cookie、票据、序列化、无 data 成功响应及 HTTP 403 错误映射。`uv build` 可生成 wheel 和源码包，wheel 包含类型标记。真实打卡授权仍需官方小程序有效票据；这里的写操作验证不代表线上提交成功。
+严格类型检查通过，发布接口的类型完整性检查为 100%；22 个回归测试通过。原有 14 项覆盖认证/授权业务码、票据前置条件、非 2xx 票据错误、不重试提交、重定向不泄露凭据、空记录与坏记录、JSON 内嵌联系人、大整数分页、三态历史筛选、坐标边界及本地时间格式。新增 8 项覆盖 CAS 成功换会话、SSO 轮换、原客户端不变、凭据隔离、二次认证、跨域/降级跳转、平台状态严格解析、应用身份拒绝、缺失 SESSION 和 Cookie 头注入。
+
+CAS 成功链路通过本地 HTTP 服务运行，真实 CAS 用失效凭据验证了 `ReauthenticationRequiredError`。此前逆向函数已用有效 SSO Cookie 换出新 SESSION 并核对同一学生身份；本次 SDK 方法尚未用有效 Cookie 重跑，当前 Chrome 设备不可用。没有读取或提交账号密码，也没有线上业务写入。
+
+另用本地 HTTP 服务运行了打卡、填报、诊断日志协议，验证 Cookie、票据、序列化、无 data 成功响应及 HTTP 403 错误映射。`uv build` 可生成 wheel 和源码包，wheel 包含类型标记。真实打卡授权仍需官方小程序有效票据；这里的写操作验证不代表线上提交成功。
 
 Go SDK 另通过 `gofmt`、`go vet`、24 个本地测试和 `go test -race`，并针对真实服务验证了匿名 SESSION 缺失会返回 `AuthenticationError(code=5000)`。Go 客户端没有用真实 SESSION 重跑已认证读取，也没有线上提交写入；这部分沿用 Python 的线上只读结果和本地 HTTP 写入协议验证。Go 测试命令见 [go-sdk/README.md](go-sdk/README.md)。

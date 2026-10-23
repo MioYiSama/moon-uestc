@@ -2,7 +2,7 @@
 
 
 class MoonError(Exception):
-    """Base SDK error. Network failures retain httpx2's own exception types."""
+    """Base SDK error; CAS exchange sanitizes network failures as auth errors."""
 
 
 class APIError(MoonError):
@@ -14,6 +14,10 @@ class APIError(MoonError):
 
 class AuthenticationError(APIError):
     """The server rejected the login session."""
+
+
+class ReauthenticationRequiredError(AuthenticationError):
+    """The official CAS page requires login or secondary authentication."""
 
 
 class AuthorizationError(APIError):

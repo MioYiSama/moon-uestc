@@ -8,6 +8,7 @@ from .errors import (
     CheckinTicketError,
     MoonError,
     ProtocolError,
+    ReauthenticationRequiredError,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "MoonClient",
     "MoonError",
     "ProtocolError",
+    "ReauthenticationRequiredError",
 ]

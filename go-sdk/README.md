@@ -84,7 +84,7 @@ func main() {
 - 匿名请求真实返回业务码 `5000`（未登录或会话已失效）；Go 集成测试已验证该映射为 `*AuthenticationError`。
 - 登录响应中的 `accessToken`、`refreshToken` 目前都是 `NOT_IN_USE`，不能作为 Bearer 凭据。`Options.BearerToken` 仅保留前端存在的 Bearer 分支；未验证它可独立认证。
 - `Auth.UserInfo(ctx, sessionID)` 可传 URL 入口的 `sessionId`；空字符串不发送该参数。该换取会话的分支未取得有效样本。
-- 未发现学生前端的密码登录、刷新 token 或续期接口。SDK 不自动登录、不续期、不重试；失效后从官方入口重新登录并更新 Cookie。
+- 未发现学生前端的密码登录或刷新 token 接口。Go SDK 不自动登录、不续期、不重试，当前没有显式 CAS 换 SESSION 方法；Python 的 `auth.exchange_session()` 可用自己的有效统一认证 Cookie 换取 SESSION，详见根目录 README。
 - 禁止重定向：`NewClient` 会覆盖调用方 `HTTPClient` 的 `CheckRedirect`，避免 Cookie 被带到其他主机。仍应始终使用 HTTPS。
 
 ### 打卡与情况填报：独立操作票据

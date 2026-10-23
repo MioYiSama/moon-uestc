@@ -104,6 +104,38 @@ class UserInfo(APIModel):
     refresh_token: SecretStr | None = None
 
 
+class CASCredentials(RequestModel):
+    """Own CAS cookies; returned values include server-side cookie rotation."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(hide_input_in_errors=True)
+    castgc: SecretStr
+    browser_fingerprint: SecretStr
+    user_agent: str
+
+    @field_validator("castgc", "browser_fingerprint")
+    @classmethod
+    def validate_cookie(cls, value: SecretStr) -> SecretStr:
+        raw = value.get_secret_value()
+        if not raw or any(ord(char) <= 0x20 or ord(char) >= 0x7F or char in '";,\\' for char in raw):
+            raise ValueError("CAS cookie must be a non-empty HTTP cookie value")
+        return value
+
+    @field_validator("user_agent")
+    @classmethod
+    def validate_user_agent(cls, value: str) -> str:
+        if not value.strip() or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+            raise ValueError("user_agent must be a non-empty single-line browser user agent")
+        return value
+
+
+class CASSession(APIModel):
+    """A verified new SESSION; the original MoonClient remains unchanged."""
+
+    session: SecretStr
+    credentials: CASCredentials
+    user_info: UserInfo
+
+
 class Entity(APIModel):
     id: str
     create_time: datetime | None = None

@@ -5,8 +5,9 @@ from types import TracebackType
 import httpx2
 from pydantic import SecretStr
 
+from ._cas import exchange_session
 from ._transport import Transport
-from .models import APIResponse, UserInfo
+from .models import APIResponse, CASSession, UserInfo
 from .student import ClassCadreService, StudentService
 
 
@@ -26,6 +27,28 @@ class AuthService:
 
     def service_account_subscribed(self) -> APIResponse[bool]:
         return self._http.request("GET", "/api/user/service-account-subscribed", APIResponse[bool])
+
+    def exchange_session(
+        self,
+        *,
+        castgc: str | SecretStr,
+        browser_fingerprint: str | SecretStr,
+        user_agent: str,
+        transport: httpx2.BaseTransport | None = None,
+    ) -> CASSession:
+        """Exchange valid CAS cookies for a verified SESSION without changing this client.
+
+        A separate connection pool and cookie jar are used. ``transport`` applies
+        only to this exchange, independently of MoonClient's business transport.
+        Returned credentials retain CAS cookie rotation for the next exchange.
+        """
+        return exchange_session(
+            self._http,
+            castgc=castgc,
+            browser_fingerprint=browser_fingerprint,
+            user_agent=user_agent,
+            transport=transport,
+        )
 
 
 class MoonClient:

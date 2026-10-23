@@ -30,7 +30,7 @@ class Transport:
         session: str | SecretStr | None,
         bearer_token: str | SecretStr | None,
         checkin_ticket: str | SecretStr | None,
-        timeout: float,
+        timeout: float | httpx2.Timeout,
         transport: httpx2.BaseTransport | None,
     ) -> None:
         self.base_url: str = base_url.rstrip("/")

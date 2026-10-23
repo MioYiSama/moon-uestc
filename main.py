@@ -9,7 +9,7 @@ with MoonClient(session=os.environ["MOON_SESSION"], checkin_ticket="1") as clien
         latitude=30.68,
         longitude=104.10,
     ).data
-
+    print(address)
     result = client.student.checkin(
         CheckinRequest(
             client_time=datetime.now(),

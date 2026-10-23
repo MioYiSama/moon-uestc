@@ -10,3 +10,6 @@ wheels/
 .venv
 .env*
 .DS_Store
+
+# Local authentication credentials
+.moon-uestc-auth.json*

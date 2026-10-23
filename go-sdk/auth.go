@@ -28,6 +28,41 @@ func (a *AuthService) UserInfo(ctx context.Context, sessionID string) (*Response
 	return response, nil
 }
 
+// RequestCheckinTicket exchanges a caller-supplied mini-program login code for
+// a check-in operation ticket. It returns the ticket but does not install it.
+func (a *AuthService) RequestCheckinTicket(ctx context.Context, code string) (*Response[CheckinTicket], error) {
+	if code == "" {
+		return nil, &ValidationError{Field: "code", Message: "must not be empty"}
+	}
+	response, err := requestAt[CheckinTicket](
+		a.client, ctx, a.client.origin+"/platform-app/api/auth/checkin-ticket",
+		http.MethodPost, nil, struct {
+			Code string `json:"code"`
+		}{Code: code}, false, "mp-weixin",
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !validCheckinTicket(response.Data.Ticket) {
+		return nil, &ProtocolError{Message: "checkin-ticket response contains an invalid ticket"}
+	}
+	return response, nil
+}
+
+func validCheckinTicket(ticket string) bool {
+	if len(ticket) != 43 {
+		return false
+	}
+	for i := range len(ticket) {
+		char := ticket[i]
+		if (char < 'A' || char > 'Z') && (char < 'a' || char > 'z') &&
+			(char < '0' || char > '9') && char != '_' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 // ServiceAccountSubscribed reports whether the user follows the service account.
 // A missing data field is a protocol error; false is a valid value.
 func (a *AuthService) ServiceAccountSubscribed(ctx context.Context) (*Response[*bool], error) {

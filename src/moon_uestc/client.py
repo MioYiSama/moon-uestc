@@ -3,15 +3,20 @@ from __future__ import annotations
 from types import TracebackType
 
 import httpx2
-from pydantic import SecretStr
+from pydantic import ConfigDict, Field, SecretStr
 
 from ._cas import exchange_session
 from ._transport import Transport
-from .models import APIResponse, CASSession, UserInfo
+from .models import APIResponse, CASSession, CheckinTicket, RequestModel, UserInfo
 from .student import ClassCadreService, StudentService
 
 
 DEFAULT_BASE_URL = "https://jzsz.uestc.edu.cn/daily-checkin"
+
+
+class _CheckinTicketRequest(RequestModel):
+    model_config = ConfigDict(hide_input_in_errors=True)
+    code: str = Field(min_length=1, repr=False)
 
 
 class AuthService:
@@ -27,6 +32,20 @@ class AuthService:
 
     def service_account_subscribed(self) -> APIResponse[bool]:
         return self._http.request("GET", "/api/user/service-account-subscribed", APIResponse[bool])
+
+    def request_checkin_ticket(self, *, code: str | SecretStr) -> APIResponse[CheckinTicket]:
+        """Exchange a caller-provided uni.login code; does not install the ticket.
+
+        Uses this client's origin, SESSION and transport, but the mini-program
+        platform-app endpoint. No WeChat login, renewal or retry is performed.
+        """
+        request = _CheckinTicketRequest(
+            code=code.get_secret_value() if isinstance(code, SecretStr) else code,
+        )
+        return self._http.request(
+            "POST", "/api/auth/checkin-ticket", APIResponse[CheckinTicket],
+            body=request, platform_app=True,
+        )
 
     def exchange_session(
         self,
@@ -55,7 +74,8 @@ class MoonClient:
     """Synchronous typed client. Owns its HTTP connection pool.
 
     Supply only your own SESSION cookie. A checkin ticket is independent of the
-    login session and must come from the official mini-program entry. No login,
+    login session; explicitly exchange an official mini-program login code via
+    auth.request_checkin_ticket, then set_checkin_ticket. No authentication,
     ticket acquisition, refresh or business-write retry is performed implicitly.
     """
 

@@ -319,6 +319,11 @@ type UserInfo struct {
 	RefreshToken string   `json:"refreshToken,omitempty"`
 }
 
+// CheckinTicket is the independent mini-program operation ticket.
+type CheckinTicket struct {
+	Ticket string `json:"ticket"`
+}
+
 // Entity is the common persisted-record header.
 type Entity struct {
 	ID         string    `json:"id"`

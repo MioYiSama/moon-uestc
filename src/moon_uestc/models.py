@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from enum import StrEnum
+from re import fullmatch
 from typing import Annotated, ClassVar, Literal
 
 from pydantic import (
@@ -102,6 +103,20 @@ class UserInfo(APIModel):
     user_data: UserData
     access_token: SecretStr | None = None
     refresh_token: SecretStr | None = None
+
+
+class CheckinTicket(APIModel):
+    """Server-issued operation ticket; no expiry or generation scheme is inferred."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(hide_input_in_errors=True)
+    ticket: SecretStr
+
+    @field_validator("ticket")
+    @classmethod
+    def _validate_ticket(cls, value: SecretStr) -> SecretStr:
+        if fullmatch(r"[A-Za-z0-9_-]{43}", value.get_secret_value()) is None:
+            raise ValueError("Expected a 43-character URL-safe checkin ticket")
+        return value
 
 
 class CASCredentials(RequestModel):

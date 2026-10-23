@@ -992,3 +992,329 @@ func TestLiveAnonymousSessionRejected(t *testing.T) {
 		t.Fatalf("unexpected live error: %#v", authErr.APIError)
 	}
 }
+
+func TestRequestCheckinTicketCanBeExplicitlyInstalled(t *testing.T) {
+	const loginCode = " login-code +/% "
+	ticket := strings.Repeat("T", 43)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if cookie, err := r.Cookie("SESSION"); err != nil || cookie.Value != "session-secret" {
+			t.Errorf("unexpected SESSION cookie: %#v, %v", cookie, err)
+		}
+		switch r.URL.Path {
+		case "/platform-app/api/auth/checkin-ticket":
+			if r.Method != http.MethodPost || r.Header.Get("platform") != "mp-weixin" {
+				t.Errorf("unexpected ticket request method/platform: %s %q", r.Method, r.Header.Get("platform"))
+			}
+			if r.Header.Get("X-Checkin-Ticket") != "" {
+				t.Error("ticket acquisition must not send an existing operation ticket")
+			}
+			if r.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("unexpected content type: %q", r.Header.Get("Content-Type"))
+			}
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read ticket request body: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Errorf("decode ticket request body: %v", err)
+			}
+			var body struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Errorf("decode login code: %v", err)
+			}
+			if len(fields) != 1 || body.Code != loginCode {
+				t.Errorf("ticket request body did not preserve the code exactly: %s", raw)
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"data":{"ticket":"`+ticket+`"}}`)
+		case "/custom-prefix/api/user/service-account-subscribed":
+			if r.Method != http.MethodGet || r.Header.Get("platform") != "h5" {
+				t.Errorf("normal API method/platform changed: %s %q", r.Method, r.Header.Get("platform"))
+			}
+			if r.Header.Get("X-Checkin-Ticket") != "" {
+				t.Error("normal API unexpectedly sent the check-in ticket")
+			}
+			_, _ = io.WriteString(w, `{"code":0,"data":true}`)
+		case "/custom-prefix/api/student-checkin-record/checkin",
+			"/custom-prefix/api/student-checkin-record/report":
+			if r.Method != http.MethodPost || r.Header.Get("platform") != "h5" {
+				t.Errorf("write API method/platform changed: %s %q", r.Method, r.Header.Get("platform"))
+			}
+			if got := r.Header.Get("X-Checkin-Ticket"); got != ticket {
+				t.Errorf("write did not use explicitly installed ticket: %q", got)
+			}
+			_, _ = io.WriteString(w, `{"code":0}`)
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := moonuestc.NewClient(moonuestc.Options{
+		BaseURL:    server.URL + "/custom-prefix",
+		Session:    "session-secret",
+		HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(client.CloseIdleConnections)
+	ctx := context.Background()
+
+	response, err := client.Auth.RequestCheckinTicket(ctx, loginCode)
+	if err != nil {
+		t.Fatalf("RequestCheckinTicket: %v", err)
+	}
+	if response.Data.Ticket != ticket || response.OK == nil || !*response.OK {
+		t.Fatalf("unexpected ticket response: %#v", response)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("ticket acquisition made %d requests, want 1", calls.Load())
+	}
+	_, err = client.Student.Checkin(ctx, validCheckin())
+	var ticketErr *moonuestc.CheckinTicketError
+	if !errors.As(err, &ticketErr) {
+		t.Fatalf("ticket was installed automatically; want CheckinTicketError, got %T: %v", err, err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("missing-ticket check-in reached the network: %d requests", calls.Load())
+	}
+	if err := client.SetCheckinTicket(response.Data.Ticket); err != nil {
+		t.Fatalf("SetCheckinTicket: %v", err)
+	}
+
+	subscribed, err := client.Auth.ServiceAccountSubscribed(ctx)
+	if err != nil || subscribed.Data == nil || !*subscribed.Data {
+		t.Fatalf("ServiceAccountSubscribed: %#v, %v", subscribed, err)
+	}
+	if _, err := client.Student.Checkin(ctx, validCheckin()); err != nil {
+		t.Fatalf("Checkin: %v", err)
+	}
+	if _, err := client.Student.Report(ctx, moonuestc.ReportRequest{
+		ReportedLocationTypeCode: moonuestc.LocationTypeCampus,
+		CaseKeywordID:            "keyword-1",
+		Latitude:                 30.674521,
+		Longitude:                104.096295,
+		ReverseGeocode:           "四川省成都市成华区一环路东一段",
+		CaseRemark:               "test remark",
+	}); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if calls.Load() != 4 {
+		t.Fatalf("unexpected request count after explicit install: %d, want 4", calls.Load())
+	}
+}
+
+func TestRequestCheckinTicketRequiresStrictEnvelopeAndTicket(t *testing.T) {
+	validTicket := strings.Repeat("v", 43)
+	tests := []struct {
+		name          string
+		body          string
+		businessError bool
+	}{
+		{
+			name:          "false ok despite code zero",
+			body:          `{"code":0,"ok":false,"data":{"ticket":"` + validTicket + `"}}`,
+			businessError: true,
+		},
+		{
+			name:          "missing ok despite status true",
+			body:          `{"code":0,"status":true,"data":{"ticket":"` + validTicket + `"}}`,
+			businessError: true,
+		},
+		{
+			name: "missing ticket",
+			body: `{"code":0,"ok":true,"data":{}}`,
+		},
+		{
+			name: "ticket is too short",
+			body: `{"code":0,"ok":true,"data":{"ticket":"short"}}`,
+		},
+		{
+			name: "ticket contains invalid alphabet",
+			body: `{"code":0,"ok":true,"data":{"ticket":"` + strings.Repeat("a", 42) + `!"}}`,
+		},
+	}
+	const loginCode = "private-login-code"
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, test.body)
+			}, moonuestc.Options{})
+			_, err := client.Auth.RequestCheckinTicket(context.Background(), loginCode)
+			var protocolErr *moonuestc.ProtocolError
+			var apiErr *moonuestc.APIError
+			if test.businessError && !errors.As(err, &apiErr) || !test.businessError && !errors.As(err, &protocolErr) {
+				t.Fatalf("unexpected error type (business=%v): %T: %v", test.businessError, err, err)
+			}
+			if strings.Contains(err.Error(), loginCode) || strings.Contains(err.Error(), test.body) {
+				t.Fatalf("protocol error exposed request or response data: %v", err)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("expected one request, got %d", calls.Load())
+			}
+		})
+	}
+}
+
+func TestRequestCheckinTicketRejectsEmptyCodeBeforeNetwork(t *testing.T) {
+	var calls atomic.Int32
+	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"ok":true,"data":{"ticket":"`+strings.Repeat("x", 43)+`"}}`)
+	}, moonuestc.Options{})
+	_, err := client.Auth.RequestCheckinTicket(context.Background(), "")
+	var validationErr *moonuestc.ValidationError
+	if !errors.As(err, &validationErr) || validationErr.Field != "code" {
+		t.Fatalf("want code ValidationError, got %T: %v", err, err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("empty login code reached the network: %d requests", calls.Load())
+	}
+}
+
+func TestFailedCheckinTicketAcquisitionPreservesExistingTicketWithoutRetry(t *testing.T) {
+	const loginCode = "private-login-code"
+	const existingTicket = "previously-installed-ticket"
+	failureBody := `{"code":0,"ok":false,"data":{"ticket":"` + strings.Repeat("N", 43) + `"}}`
+	var acquisitionCalls atomic.Int32
+	var checkinCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if cookie, err := r.Cookie("SESSION"); err != nil || cookie.Value != "session-secret" {
+			t.Errorf("unexpected SESSION cookie: %#v, %v", cookie, err)
+		}
+		switch r.URL.Path {
+		case "/platform-app/api/auth/checkin-ticket":
+			acquisitionCalls.Add(1)
+			if r.Method != http.MethodPost || r.Header.Get("platform") != "mp-weixin" {
+				t.Errorf("unexpected ticket request method/platform: %s %q", r.Method, r.Header.Get("platform"))
+			}
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read ticket request body: %v", err)
+			}
+			var body struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(raw, &body); err != nil || body.Code != loginCode {
+				t.Errorf("unexpected login-code request body: %s (%v)", raw, err)
+			}
+			_, _ = io.WriteString(w, failureBody)
+		case "/custom-prefix/api/student-checkin-record/checkin":
+			checkinCalls.Add(1)
+			if r.Header.Get("platform") != "h5" {
+				t.Errorf("check-in platform changed: %q", r.Header.Get("platform"))
+			}
+			if got := r.Header.Get("X-Checkin-Ticket"); got != existingTicket {
+				t.Errorf("failed acquisition changed installed ticket: %q", got)
+			}
+			_, _ = io.WriteString(w, `{"code":0}`)
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := moonuestc.NewClient(moonuestc.Options{
+		BaseURL:       server.URL + "/custom-prefix",
+		Session:       "session-secret",
+		CheckinTicket: existingTicket,
+		HTTPClient:    server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(client.CloseIdleConnections)
+
+	_, err = client.Auth.RequestCheckinTicket(context.Background(), loginCode)
+	var apiErr *moonuestc.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("want APIError for ok=false, got %T: %v", err, err)
+	}
+	if strings.Contains(err.Error(), loginCode) || strings.Contains(err.Error(), failureBody) {
+		t.Fatalf("protocol error exposed request or response data: %v", err)
+	}
+	if acquisitionCalls.Load() != 1 {
+		t.Fatalf("ticket acquisition retried: %d calls", acquisitionCalls.Load())
+	}
+	if _, err := client.Student.Checkin(context.Background(), validCheckin()); err != nil {
+		t.Fatalf("Checkin after failed acquisition: %v", err)
+	}
+	if acquisitionCalls.Load() != 1 || checkinCalls.Load() != 1 {
+		t.Fatalf("unexpected request counts: acquisition=%d checkin=%d", acquisitionCalls.Load(), checkinCalls.Load())
+	}
+}
+
+func TestRequestCheckinTicketPreservesBusinessAndHTTPErrorMappings(t *testing.T) {
+	tests := []struct {
+		name               string
+		status             int
+		body               string
+		wantTicketError    bool
+		wantAuthentication bool
+		wantAuthorization  bool
+	}{
+		{
+			name:            "ticket business code",
+			status:          http.StatusOK,
+			body:            `{"code":46002,"ok":false}`,
+			wantTicketError: true,
+		},
+		{
+			name:               "authentication business code",
+			status:             http.StatusOK,
+			body:               `{"code":5000,"msg":"系统异常: 未登录或会话已失效","ok":false}`,
+			wantAuthentication: true,
+		},
+		{
+			name:               "unauthorized HTTP status",
+			status:             http.StatusUnauthorized,
+			body:               `{"code":0,"ok":false}`,
+			wantAuthentication: true,
+		},
+		{
+			name:              "forbidden HTTP status",
+			status:            http.StatusForbidden,
+			body:              `{"code":0,"ok":false}`,
+			wantAuthorization: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.body)
+			}, moonuestc.Options{})
+			_, err := client.Auth.RequestCheckinTicket(context.Background(), "login-code")
+			switch {
+			case test.wantTicketError:
+				var target *moonuestc.CheckinTicketError
+				if !errors.As(err, &target) {
+					t.Fatalf("want CheckinTicketError, got %T: %v", err, err)
+				}
+			case test.wantAuthentication:
+				var target *moonuestc.AuthenticationError
+				if !errors.As(err, &target) {
+					t.Fatalf("want AuthenticationError, got %T: %v", err, err)
+				}
+			case test.wantAuthorization:
+				var target *moonuestc.AuthorizationError
+				if !errors.As(err, &target) {
+					t.Fatalf("want AuthorizationError, got %T: %v", err, err)
+				}
+			}
+		})
+	}
+}

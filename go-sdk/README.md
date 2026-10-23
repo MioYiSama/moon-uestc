@@ -80,7 +80,7 @@ func main() {
 
 ### 登录身份：SESSION
 
-- 当前服务真正使用的是 `SESSION` Cookie。Go 客户端使用独立的域限制 cookiejar，固定发送 `platform: h5`，并接收服务端 `Set-Cookie` 对 SESSION 的更新；重定向仍然禁用。
+- 当前服务真正使用的是 `SESSION` Cookie。Go 客户端使用独立的域限制 cookiejar；普通 API 固定发送 `platform: h5`，仅显式票据获取请求发送 `platform: mp-weixin`。服务端对 SESSION 的更新由 cookiejar 保存；重定向仍然禁用。
 - 匿名请求真实返回业务码 `5000`（未登录或会话已失效）；Go 集成测试已验证该映射为 `*AuthenticationError`。
 - 登录响应中的 `accessToken`、`refreshToken` 目前都是 `NOT_IN_USE`，不能作为 Bearer 凭据。`Options.BearerToken` 仅保留前端存在的 Bearer 分支；未验证它可独立认证。
 - `Auth.UserInfo(ctx, sessionID)` 可传 URL 入口的 `sessionId`；空字符串不发送该参数。该换取会话的分支未取得有效样本。
@@ -89,24 +89,34 @@ func main() {
 
 ### 打卡与情况填报：独立操作票据
 
-`Student.Checkin` 和 `Student.Report` 还需要 `X-Checkin-Ticket`。票据来自官方微信小程序进入 H5 时的 `checkinTicket` 参数，保存在页面 `sessionStorage`，和登录 Cookie 是两套授权。
+`Student.Checkin` 和 `Student.Report` 需要独立的 `X-Checkin-Ticket`，它与登录 Cookie 是两套授权。可以显式调用 `Auth.RequestCheckinTicket(ctx, code)`，用调用方在官方目标 AppID 的实际小程序运行时执行 `uni.login({provider: "weixin"})` 获得的 `code` 换取票据；仅有解包的静态 bundle 无法取得该 code。SDK 不调用 `uni.login`。
 
 ```go
 client, err := moonuestc.NewClient(moonuestc.Options{
-	Session:       os.Getenv("MOON_SESSION"),
-	CheckinTicket: os.Getenv("MOON_CHECKIN_TICKET"),
+	Session: os.Getenv("MOON_SESSION"),
 })
-// 重新授权后：
-if err := client.SetCheckinTicket(newTicket); err != nil {
+if err != nil {
 	panic(err)
 }
-// 清除：
-_ = client.SetCheckinTicket("")
+
+loginCode := os.Getenv("MOON_WECHAT_LOGIN_CODE") // 由调用方从 uni.login(...) 获得
+ticketResponse, err := client.Auth.RequestCheckinTicket(ctx, loginCode)
+if err != nil {
+	panic(err)
+}
+// 获取不会自动安装或替换客户端中的票据；显式安装后才可用于打卡和填报。
+if err := client.SetCheckinTicket(ticketResponse.Data.Ticket); err != nil {
+	panic(err)
+}
 ```
 
+- 请求为 `POST /platform-app/api/auth/checkin-ticket`，使用 `platform: mp-weixin` 和同一客户端的 `SESSION` Cookie。路径从 `BaseURL` 的 origin（scheme + host）开始，而非追加到 `BaseURL` 的路径前缀：例如 `BaseURL: "https://example.test/daily-checkin"` 时，票据请求发往 `https://example.test/platform-app/api/auth/checkin-ticket`，普通 API 仍使用 `/daily-checkin/...` 并发送 `platform: h5`。
+- `code` 只校验非空且原样发送，不会 trim 或额外校验其格式。成功必须满足原始响应字段 `ok: true`；`code: 0` 或 `status: true` 不能代替它。返回的 `data.ticket` 必须恰为 43 个 ASCII 字符 `[A-Za-z0-9_-]`。
+- 获取结果只返回在 `*Response[CheckinTicket]` 中，不会自动安装、替换或清除已配置的票据；获取失败也不会改动已有票据。可用 `SetCheckinTicket(ticketResponse.Data.Ticket)` 显式安装，或使用 `Options.CheckinTicket` 预先配置；可用 `SetCheckinTicket("")` 清除。
+- SDK 不自动重试或跟随重定向，也不代替调用方登录。票据的有效期未验证，SDK 不推断或缓存 TTL。
 - 没有票据时，SDK 在联网前返回 `*CheckinTicketError`；服务端返回 `46001`、`46002`、`46003` 时也映射为该类型。具体业务码细分含义未验证。
-- 前端要求这些码出现后回到「成电智慧学工」小程序重新授权。SDK 不获取、伪造或绕过票据，也不会自动重试打卡、填报或班委上报。
-- 当前没有向线上提交打卡或填报。写入协议、票据头、Cookie、时间格式和无 `data` 响应均由本地 `httptest` 服务验证。
+- 服务端拒绝操作票据时，前端要求回到「成电智慧学工」小程序重新授权。SDK 不伪造或绕过票据，也不会自动重试打卡、填报或班委上报。
+- 没有向线上提交打卡或填报；写入协议和票据获取流程由本地 `httptest` 服务验证。
 
 ### 权限范围
 
@@ -119,7 +129,7 @@ _ = client.SetCheckinTicket("")
 | Go 方法 | HTTP 与路径 | 返回 `Data` |
 | --- | --- | --- |
 | `Auth.UserInfo(ctx, sessionID)` | GET `/api/auth/user-info` | `UserInfo` |
-| `Auth.ServiceAccountSubscribed(ctx)` | GET `/api/user/service-account-subscribed` | `*bool` |
+| `Auth.RequestCheckinTicket(ctx, code)` | POST origin + `/platform-app/api/auth/checkin-ticket` | `CheckinTicket`；需原始 `ok: true` |
 | `Student.EffectiveSchedule(ctx)` | GET `/api/checkin-schedule/effective` | `*CheckinSchedule` |
 | `Student.AvailableLocations(ctx)` | GET `/api/checkin-location/available-locations` | `[]CheckinLocation` |
 | `Student.CampusFences(ctx)` | GET `/api/campus-fence/current-student` | `[]CampusFence` |
@@ -182,7 +192,7 @@ default:
 }
 ```
 
-`CheckinTicketError` 会依次解包到 `AuthorizationError` 和 `APIError`，因此 `errors.As` 可以按需要的层级判断。HTTP 401/403、其它非 2xx、重定向、登录 HTML 和响应类型错误分别有对应类型；错误消息不包含 Cookie、票据或完整响应正文。
+`CheckinTicketError` 会依次解包到 `AuthorizationError` 和 `APIError`，因此 `errors.As` 可以按需要的层级判断。HTTP 401/403、其它非 2xx、重定向、登录 HTML 和响应类型错误分别有对应类型；错误消息不包含 Cookie、票据、登录 code 或完整响应正文。
 
 ## 验证
 
@@ -198,6 +208,8 @@ go test -cover ./... -count=1
 MOON_LIVE=1 go test -run TestLiveAnonymousSessionRejected -v
 ```
 
-当前结果：本地 24 个顶层测试通过，语句覆盖率 83.5%，覆盖全部 18 个路径/方法、认证与票据错误、标量缺失数据、Cookie 更新、重定向不泄露凭据、JSON 内嵌联系人、字符串大整数、三态历史筛选、写入编码、无自动重试、响应契约校验、日期时间和选项边界。`go test -race` 通过。真实服务匿名请求返回 `5000` 并正确映射为 `AuthenticationError`。
+截至新增显式票据获取 API 之前的记录：本地 24 个顶层测试通过，语句覆盖率 83.5%，覆盖当时已有的 18 个路径/方法及认证、Cookie、重定向、响应契约和请求校验；`go test -race` 通过。真实服务匿名请求返回 `5000` 并正确映射为 `AuthenticationError`。这些数字不包含本次新增的票据获取测试。
 
 没有用真实 SESSION 重新执行 Go 端已认证读取；该部分沿用 Python SDK 的线上只读验证。没有向线上提交任何打卡、填报、定位日志或班委上报。真实打卡仍需要官方小程序的有效票据。
+
+本次新增取票 API 后已运行 `gofmt`、`go vet ./...` 和 `go test -race ./... -count=1 -v`。另以独立的本地 HTTP 场景执行真实 SDK 调用，验证只含 `ok: true` 的取票成功响应、SESSION、原始 code 请求体、显式安装前禁止提交、安装后的打卡/填报请求头、失败不替换旧票据、自定义业务前缀及普通 H5 读取不受影响。没有调用线上签发接口，也没有取得或验证真实微信 code。

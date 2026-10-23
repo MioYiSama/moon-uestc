@@ -1,5 +1,7 @@
 """HTTP, business, authentication and contract failures are separate."""
 
+from typing import Literal
+
 
 class MoonError(Exception):
     """Base SDK error; CAS exchange sanitizes network failures as auth errors."""
@@ -18,6 +20,14 @@ class AuthenticationError(APIError):
 
 class ReauthenticationRequiredError(AuthenticationError):
     """The official CAS page requires login or secondary authentication."""
+
+
+class CaptchaRequiredError(AuthenticationError):
+    """The same IDAS client must complete a CAPTCHA before retrying login."""
+
+    def __init__(self, kind: Literal["image", "slider"]) -> None:
+        self.kind: Literal["image", "slider"] = kind
+        super().__init__(f"IDAS login requires a caller-completed {kind} CAPTCHA")
 
 
 class AuthorizationError(APIError):

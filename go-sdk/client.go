@@ -200,6 +200,17 @@ func (c *Client) sendAt(
 	body any,
 	signed bool,
 ) (*wireResponse, error) {
+	return c.sendAtPlatform(ctx, endpoint, method, query, body, signed, "h5")
+}
+
+func (c *Client) sendAtPlatform(
+	ctx context.Context,
+	endpoint, method string,
+	query url.Values,
+	body any,
+	signed bool,
+	platform string,
+) (*wireResponse, error) {
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
@@ -215,7 +226,7 @@ func (c *Client) sendAt(
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("platform", "h5")
+	request.Header.Set("platform", platform)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -246,20 +257,6 @@ func (c *Client) sendAt(
 	return &wireResponse{status: response.StatusCode, header: response.Header, body: responseBody}, nil
 }
 
-func (c *Client) doJSON(
-	ctx context.Context,
-	method, path string,
-	query url.Values,
-	body any,
-	signed bool,
-) ([]byte, error) {
-	response, err := c.send(ctx, method, path, query, body, signed)
-	if err != nil {
-		return nil, err
-	}
-	return c.validateEnvelope(response.status, response.body)
-}
-
 func request[T any](
 	c *Client,
 	ctx context.Context,
@@ -268,7 +265,23 @@ func request[T any](
 	body any,
 	signed bool,
 ) (*Response[T], error) {
-	payload, err := c.doJSON(ctx, method, path, query, body, signed)
+	return requestAt[T](c, ctx, c.baseURL+path, method, query, body, signed, "h5")
+}
+
+func requestAt[T any](
+	c *Client,
+	ctx context.Context,
+	endpoint, method string,
+	query url.Values,
+	body any,
+	signed bool,
+	platform string,
+) (*Response[T], error) {
+	wire, err := c.sendAtPlatform(ctx, endpoint, method, query, body, signed, platform)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := c.validateEnvelope(wire.status, wire.body, platform == "mp-weixin")
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +292,7 @@ func request[T any](
 	return &response, nil
 }
 
-func (c *Client) validateEnvelope(status int, payload []byte) ([]byte, error) {
+func (c *Client) validateEnvelope(status int, payload []byte, requireOK bool) ([]byte, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		if status >= 200 && status < 300 {
@@ -311,6 +324,13 @@ func (c *Client) validateEnvelope(status int, payload []byte) ([]byte, error) {
 	}
 	if status < 200 || status >= 300 {
 		return nil, &HTTPError{StatusCode: status, Message: message}
+	}
+	// The mini-program endpoint checks raw ok, independently of H5 code/status.
+	if requireOK {
+		if rawBool(raw["ok"]) {
+			return payload, nil
+		}
+		return nil, &APIError{Message: message, Code: code, HasCode: hasCode, StatusCode: status}
 	}
 	if (hasCode && code == 0) || statusTrue {
 		return payload, nil

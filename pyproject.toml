@@ -8,9 +8,15 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "cryptography>=46.0.0",
     "httpx2>=2.16.0",
+    "pillow>=11.0.0",
+    "prompt-toolkit>=3.0.50",
     "pydantic>=2.14.1",
 ]
+
+[project.scripts]
+moon-uestc = "moon_uestc.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14.0"]

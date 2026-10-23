@@ -221,7 +221,7 @@ func (s *StudentService) DownloadAvatar(ctx context.Context, filePath string) ([
 		mediaType != "application/json" && mediaType != "text/html" {
 		return response.body, nil
 	}
-	if _, err := s.client.validateEnvelope(response.status, response.body); err != nil {
+	if _, err := s.client.validateEnvelope(response.status, response.body, false); err != nil {
 		return nil, err
 	}
 	return nil, &ProtocolError{Message: "avatar response was not an image"}

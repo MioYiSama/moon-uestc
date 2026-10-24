@@ -1,0 +1,17 @@
+name: moonuestc
+
+services:
+  moonuestc:
+    image: mioyisama/moonuestc:latest
+    build: .
+
+    container_name: moonuestc
+    restart: unless-stopped
+    environment:
+      MOON_ADMIN_PASSWORD: strong_password
+
+    ports:
+      - 8080:8080
+
+    volumes:
+      - ./data:/data

@@ -1,0 +1,264 @@
+{{define "login"}}
+<section class="login-panel" aria-labelledby="login-title">
+  <h1 id="login-title">管理员登录</h1>
+  <p class="login-intro">输入管理员口令，继续管理微信绑定账号与每日签到。</p>
+  {{if .Error}}<p class="form-error" role="alert">{{.Error}}</p>{{end}}
+  <form method="post" action="/login" class="login-form">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="password">管理员口令</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+    <button class="button button-primary" type="submit">登录</button>
+  </form>
+</section>
+{{end}}
+
+{{define "accounts"}}
+<header class="page-head">
+  <div>
+    <h1>账号</h1>
+    <p>微信绑定、凭据保活与当天签到状态。</p>
+  </div>
+  <form method="post" action="/accounts/scans" class="head-action">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button class="button button-primary" type="submit">扫码添加账号</button>
+  </form>
+</header>
+
+<section class="schedule-summary" aria-label="每日签到安排">
+  <div class="schedule-main">
+    <h2>每日签到</h2>
+    <p>下次执行 <strong>{{.NextCheckin}}</strong></p>
+  </div>
+  <div class="schedule-coordinate">
+    <span>固定位置 · GCJ-02</span>
+    <strong>{{.Coordinates}}</strong>
+  </div>
+</section>
+
+<section class="content-section" aria-labelledby="accounts-heading">
+  <div class="section-head">
+    <div>
+      <h2 id="accounts-heading">已添加账号</h2>
+      <p>{{.AccountCount}} 个账号 · 凭据到期前自动保活</p>
+    </div>
+  </div>
+  {{if .Accounts}}
+  <div class="table-frame">
+    <table class="data-table accounts-table">
+      <caption class="visually-hidden">所有已添加的学校账号、微信保活状态与今日签到结果</caption>
+      <thead>
+        <tr>
+          <th scope="col">学校账号</th>
+          <th scope="col">微信保活</th>
+          <th scope="col">最近刷新</th>
+          <th scope="col">凭据到期</th>
+          <th scope="col">签到业务会话</th>
+          <th scope="col">今日签到</th>
+          <th scope="col">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Accounts}}
+        <tr>
+          <td data-label="学校账号" class="identity-cell">
+            <a class="identity-link" href="/accounts/{{.ID}}">{{.Name}}</a>
+            <span class="cell-subline">学号：{{.Username}}</span>
+          </td>
+          <td data-label="微信保活">
+            <span class="status-mark status-{{.CredentialTone}}">{{.CredentialStatus}}</span>
+            {{if .CredentialIssue}}<span class="cell-subline">{{.CredentialIssue}}</span>{{end}}
+            <span class="cell-subline tablet-only">最近刷新：{{.LastRefresh}}</span>
+            <span class="cell-subline tablet-only">凭据到期：{{.Expires}}</span>
+          </td>
+          <td data-label="最近刷新" class="time-cell">{{.LastRefresh}}</td>
+          <td data-label="凭据到期" class="time-cell">{{.Expires}}</td>
+          <td data-label="签到业务会话">
+            <span class="status-mark status-{{.BusinessTone}}">{{.BusinessStatus}}</span>
+            <span class="cell-subline">最近校验：{{.BusinessCheckedAt}}</span>
+            {{if .BusinessError}}<span class="cell-subline">错误码 {{.BusinessError}}</span>{{end}}
+          </td>
+          <td data-label="今日签到">{{.TodayStatus}}</td>
+          <td data-label="操作" class="row-actions">
+            <a class="quiet-link" href="/accounts/{{.ID}}">查看</a>
+            <form method="post" action="/accounts/{{.ID}}/checkin" data-checkin>
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <button class="text-button" type="submit">手动签到</button>
+            </form>
+            <form method="post" action="/accounts/{{.ID}}/rescan">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <button class="text-button" type="submit">重新扫码</button>
+            </form>
+            <form method="post" action="/accounts/{{.ID}}/delete" class="delete-form" data-confirm="确认删除 {{.DeleteName}}？该账号将从本地列表移除，之后不再发起新的请求。">
+              <input type="hidden" name="csrf" value="{{$.CSRF}}">
+              <label class="confirm-check"><input type="checkbox" name="confirm" value="{{.DeleteConfirmValue}}" required><span>确认删除</span></label>
+              <button class="text-button destructive" type="submit">删除</button>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty-state">
+    <div>
+      <h3>还没有添加账号</h3>
+      <p>使用微信扫码添加已在官方小程序绑定学校账号的身份。添加过程只校验绑定与身份，不会立即签到。</p>
+    </div>
+    <form method="post" action="/accounts/scans">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="button button-secondary" type="submit">开始扫码</button>
+    </form>
+  </div>
+  {{end}}
+</section>
+{{end}}
+
+{{define "account"}}
+<header class="page-head detail-head">
+  <div>
+    <a class="back-link" href="/accounts">返回账号</a>
+    <h1>{{.Account.Name}}</h1>
+    <p>学号 {{.Account.Username}} · 学校身份 ID {{.Account.SchoolUserID}}</p>
+  </div>
+  <div class="head-actions">
+    <form method="post" action="/accounts/{{.Account.ID}}/checkin" data-checkin>
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="button button-primary" type="submit">手动签到</button>
+    </form>
+    <form method="post" action="/accounts/{{.Account.ID}}/rescan">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="button button-secondary" type="submit">重新扫码</button>
+    </form>
+  </div>
+</header>
+
+<section class="schedule-summary detail-schedule" aria-label="每日签到安排">
+  <div class="schedule-main">
+    <h2>每日签到</h2>
+    <p>下次执行 <strong>{{.NextCheckin}}</strong></p>
+    <p>手动签到立即执行当天流程；当天签到成功后跳过，未成功可再次执行。</p>
+  </div>
+  <div class="schedule-coordinate">
+    <span>固定位置 · GCJ-02</span>
+    <strong>{{.Coordinates}}</strong>
+  </div>
+</section>
+
+<section class="content-section" aria-labelledby="account-state-heading">
+  <div class="section-head"><div><h2 id="account-state-heading">账号状态</h2><p>学校身份与微信认证状态分开显示。</p></div></div>
+  <dl class="detail-grid">
+    <div><dt>学校姓名</dt><dd>{{.Account.Name}}</dd></div>
+    <div><dt>学号</dt><dd>{{.Account.Username}}</dd></div>
+    <div><dt>学校身份 ID</dt><dd>{{.Account.SchoolUserID}}</dd></div>
+    <div><dt>微信凭据</dt><dd><span class="status-mark status-{{.Account.CredentialTone}}">{{.Account.CredentialStatus}}</span><span class="detail-note">{{.Account.CredentialExplanation}}</span>{{if .Account.CredentialIssue}}<span class="detail-note">{{.Account.CredentialIssue}}</span>{{end}}</dd></div>
+    <div><dt>最近成功刷新</dt><dd class="time-cell">{{.Account.LastRefresh}}</dd></div>
+    <div><dt>凭据到期</dt><dd class="time-cell">{{.Account.Expires}}</dd></div>
+    <div><dt>签到业务会话</dt><dd><span class="status-mark status-{{.Account.BusinessTone}}">{{.Account.BusinessStatus}}</span><span class="detail-note">{{.Account.BusinessExplanation}}</span>{{if .Account.BusinessError}}<span class="detail-note">错误码 {{.Account.BusinessError}}</span>{{end}}</dd></div>
+    <div><dt>最近业务校验</dt><dd class="time-cell">{{.Account.BusinessCheckedAt}}</dd></div>
+  </dl>
+</section>
+
+<section class="content-section" aria-labelledby="account-runs-heading">
+  <div class="section-head">
+    <div><h2 id="account-runs-heading">最近签到记录</h2><p>最多显示最近 30 次运行。</p></div>
+    <a class="quiet-link" href="/runs">查看全部记录</a>
+  </div>
+  {{if .Runs}}
+  <div class="table-frame">
+    <table class="data-table compact-table">
+      <caption class="visually-hidden">{{.Account.Name}} 最近的签到运行记录</caption>
+      <thead><tr><th scope="col">北京时间</th><th scope="col">业务日期</th><th scope="col">结果</th><th scope="col">阶段</th><th scope="col">错误码</th></tr></thead>
+      <tbody>{{range .Runs}}<tr>
+        <td data-label="北京时间" class="time-cell">{{.StartedAt}}</td>
+        <td data-label="业务日期" class="time-cell">{{.BusinessDate}}</td>
+        <td data-label="结果" class="run-result"><span class="status-mark status-{{.StatusTone}}">{{.Status}}</span>{{if .Message}}<span class="cell-subline response-message">响应：{{.Message}}</span>{{end}}</td>
+        <td data-label="阶段" class="run-stage">{{.Stage}}</td>
+        <td data-label="错误码">{{if .ErrorCode}}{{.ErrorCode}}{{else}}—{{end}}</td>
+      </tr>{{end}}</tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="empty-line">这个账号还没有签到运行记录。</p>
+  {{end}}
+</section>
+
+<section class="content-section destructive-section" aria-labelledby="delete-heading">
+  <div class="section-head"><div><h2 id="delete-heading">删除账号</h2><p>删除本地记录并停止后续调度；不会撤销微信端授权。</p></div></div>
+  <form method="post" action="/accounts/{{.Account.ID}}/delete" class="delete-confirmation" data-confirm="确认删除 {{.Account.DeleteName}}？本地记录会被移除，之后不再发起新的请求；此操作不会撤销微信端授权。">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="confirm-check"><input type="checkbox" name="confirm" value="{{.Account.DeleteConfirmValue}}" required><span>我确认删除 {{.Account.Name}}（{{.Account.Username}}）</span></label>
+    <button class="button button-danger" type="submit">删除此账号</button>
+  </form>
+</section>
+{{end}}
+
+{{define "runs"}}
+<header class="page-head">
+  <div><h1>签到记录</h1><p>最近 {{.RunCount}} 条运行结果，业务日期按北京时间计算。</p></div>
+</header>
+<section class="schedule-summary" aria-label="每日签到安排">
+  <div class="schedule-main">
+    <h2>每日签到</h2>
+    <p>下次执行 <strong>{{.NextCheckin}}</strong></p>
+  </div>
+  <div class="schedule-coordinate">
+    <span>固定位置 · GCJ-02</span>
+    <strong>{{.Coordinates}}</strong>
+  </div>
+</section>
+<section class="content-section" aria-labelledby="runs-heading">
+  <div class="section-head"><div><h2 id="runs-heading">所有账号的签到运行</h2><p>按最近运行时间排列，最多显示 100 条。</p></div></div>
+  {{if .Runs}}
+  <div class="table-frame">
+    <table class="data-table runs-table">
+      <caption class="visually-hidden">最近签到运行记录，包含账号、业务日期、结果和执行阶段</caption>
+      <thead><tr><th scope="col">学校账号</th><th scope="col">业务日期</th><th scope="col">结果</th><th scope="col">阶段</th><th scope="col">错误码</th><th scope="col">开始时间</th><th scope="col">结束时间</th></tr></thead>
+      <tbody>{{range .Runs}}<tr>
+        <td data-label="学校账号" class="identity-cell"><a class="identity-link" href="/accounts/{{.AccountID}}">{{.Name}}</a><span class="cell-subline">账号：{{.Username}}</span></td>
+        <td data-label="业务日期" class="time-cell">{{.BusinessDate}}</td>
+        <td data-label="结果" class="run-result"><span class="status-mark status-{{.StatusTone}}">{{.Status}}</span>{{if .Message}}<span class="cell-subline response-message">响应：{{.Message}}</span>{{end}}</td>
+        <td data-label="阶段" class="run-stage">{{.Stage}}</td>
+        <td data-label="错误码">{{if .ErrorCode}}{{.ErrorCode}}{{else}}—{{end}}</td>
+        <td data-label="开始时间" class="time-cell">{{.StartedAt}}</td>
+        <td data-label="结束时间" class="time-cell">{{.FinishedAt}}</td>
+      </tr>{{end}}</tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="empty-line">目前没有签到运行记录。账号添加时只做绑定与会话校验，不会提前签到。</p>
+  {{end}}
+</section>
+{{end}}
+
+{{define "scan"}}
+<header class="page-head">
+  <div>
+    <a class="back-link" href="/accounts">返回账号</a>
+    <h1>{{.Title}}</h1>
+    {{if .Scan.TargetID}}<p>目标账号：{{if .Scan.TargetName}}{{.Scan.TargetName}}{{else}}账号 {{.Scan.TargetID}}{{end}}。仅在身份校验通过后才会更新微信凭据。</p>{{else}}<p>请使用已绑定学校账号的官方微信小程序完成授权。</p>{{end}}
+  </div>
+</header>
+<section id="scan-state" class="scan-layout" data-scan-status-url="/accounts/scans/{{.Scan.ID}}/status" data-terminal="{{.Scan.Terminal}}">
+  <div class="scan-copy">
+    <div class="scan-state-line"><span id="scan-status-label" class="status-mark status-neutral">{{.Scan.StatusLabel}}</span></div>
+    <p id="scan-live-message" class="scan-message" aria-live="polite" aria-atomic="true">{{.Scan.Message}}</p>
+    <p class="scan-help">绑定校验与签到业务会话分别检查。扫码添加不会提交签到。</p>
+    {{if .Scan.AccountID}}<a id="scan-account-link" class="button button-secondary" href="/accounts/{{.Scan.AccountID}}">查看账号详情</a>{{else}}<a id="scan-account-link" class="button button-secondary" href="/accounts" hidden>返回账号列表</a>{{end}}
+    {{if not .Scan.Terminal}}
+    <form method="post" action="/accounts/scans/{{.Scan.ID}}/cancel" class="scan-cancel-form">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="text-button" type="submit">取消扫码</button>
+    </form>
+    {{end}}
+  </div>
+  {{if not .Scan.Terminal}}
+  <div class="qr-stage"><img class="qr-image" src="/accounts/scans/{{.Scan.ID}}/image" alt="微信登录二维码"><p>二维码有效期最多 5 分钟</p></div>
+  {{end}}
+</section>
+{{end}}
+
+{{define "error"}}
+<header class="page-head"><div><h1>{{.ErrorTitle}}</h1></div></header>
+<section class="error-panel" role="alert"><p>{{.Error}}</p><a class="button button-secondary" href="/accounts">返回账号</a></section>
+{{end}}

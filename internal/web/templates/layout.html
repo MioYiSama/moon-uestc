@@ -1,0 +1,86 @@
+{{define "layout"}}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{{.Title}} · moonuestc</title>
+  <link rel="preload" href="/static/ibm-plex-sans-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+{{if eq .Template "login"}}
+  <main class="login-page">
+    <a class="brand brand-login" href="/login" aria-label="moonuestc 管理后台">
+      <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true"><path d="M17.8 3.2a10.7 10.7 0 1 0 7 18.8A11.4 11.4 0 1 1 17.8 3.2Z" fill="currentColor"/><circle cx="21.4" cy="7" r="1.35" fill="currentColor"/></svg>
+      <span>moonuestc</span>
+    </a>
+    {{template "login" .}}
+  </main>
+{{else}}
+  <div class="shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="/accounts" aria-label="moonuestc 管理后台">
+        <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true"><path d="M17.8 3.2a10.7 10.7 0 1 0 7 18.8A11.4 11.4 0 1 1 17.8 3.2Z" fill="currentColor"/><circle cx="21.4" cy="7" r="1.35" fill="currentColor"/></svg>
+        <span>moonuestc</span>
+      </a>
+      <nav class="sidebar-nav" aria-label="工作区">
+        <a class="nav-link{{if eq .Nav "accounts"}} is-current{{end}}" href="/accounts"{{if eq .Nav "accounts"}} aria-current="page"{{end}}>账号</a>
+        <a class="nav-link{{if eq .Nav "runs"}} is-current{{end}}" href="/runs"{{if eq .Nav "runs"}} aria-current="page"{{end}}>签到记录</a>
+      </nav>
+      {{if .CSRF}}
+      <div class="sidebar-foot">
+        <p>单管理员工作区</p>
+        <form method="post" action="/logout">
+          <input type="hidden" name="csrf" value="{{.CSRF}}">
+          <button class="text-button" type="submit">退出登录</button>
+        </form>
+      </div>
+      {{end}}
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <span class="topbar-label">账号与签到管理</span>
+        <a class="mobile-brand" href="/accounts" aria-label="moonuestc 管理后台">
+          <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true"><path d="M17.8 3.2a10.7 10.7 0 1 0 7 18.8A11.4 11.4 0 1 1 17.8 3.2Z" fill="currentColor"/><circle cx="21.4" cy="7" r="1.35" fill="currentColor"/></svg>
+          <span>moonuestc</span>
+        </a>
+        <div class="topbar-actions">
+          <details class="mobile-nav">
+            <summary aria-label="打开导航">菜单</summary>
+            <div class="mobile-nav-panel">
+              <a href="/accounts">账号</a>
+              <a href="/runs">签到记录</a>
+              {{if .CSRF}}
+              <form method="post" action="/logout">
+                <input type="hidden" name="csrf" value="{{.CSRF}}">
+                <button class="text-button" type="submit">退出登录</button>
+              </form>
+              {{end}}
+            </div>
+          </details>
+        </div>
+      </header>
+      <main class="sheet">
+        <div class="canvas">
+          {{if eq .Template "accounts"}}
+            {{template "accounts" .}}
+          {{else if eq .Template "account"}}
+            {{template "account" .}}
+          {{else if eq .Template "runs"}}
+            {{template "runs" .}}
+          {{else if eq .Template "scan"}}
+            {{template "scan" .}}
+          {{else}}
+            {{template "error" .}}
+          {{end}}
+        </div>
+      </main>
+    </div>
+  </div>
+{{end}}
+</body>
+</html>
+{{end}}

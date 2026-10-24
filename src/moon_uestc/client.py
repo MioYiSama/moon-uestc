@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 from types import TracebackType
+from typing import Literal
 
 import httpx2
 from pydantic import ConfigDict, Field, SecretStr
 
 from ._cas import exchange_session
 from ._transport import Transport
-from .models import APIResponse, CASSession, CheckinTicket, RequestModel, UserInfo
+from .models import APIResponse, CASSession, CheckinTicket, RequestModel, UserInfo, WeChatBindResult
 from .student import ClassCadreService, StudentService
 
 
 DEFAULT_BASE_URL = "https://jzsz.uestc.edu.cn/daily-checkin"
 
 
-class _CheckinTicketRequest(RequestModel):
+class _WechatCodeRequest(RequestModel):
     model_config = ConfigDict(hide_input_in_errors=True)
     code: str = Field(min_length=1, repr=False)
+
+
+class _WechatBindRequest(_WechatCodeRequest):
+    sn: Literal[""] = ""
 
 
 class AuthService:
@@ -33,13 +38,35 @@ class AuthService:
     def service_account_subscribed(self) -> APIResponse[bool]:
         return self._http.request("GET", "/api/user/service-account-subscribed", APIResponse[bool])
 
+    def check_wechat_bind(self, *, code: str | SecretStr) -> APIResponse[WeChatBindResult]:
+        """Log into the mini-program with one fresh wx.login code.
+
+        Call on an independent client, then use data.session_id as SESSION on
+        another mini-program client. Does not install the returned session ID.
+        An unbound account must complete data.authorize_url in the official flow.
+        """
+        request = _WechatBindRequest(
+            code=code.get_secret_value() if isinstance(code, SecretStr) else code,
+        )
+        return self._http.request(
+            "POST", "/api/auth/check-bind", APIResponse[WeChatBindResult],
+            body=request, platform_app=True,
+        )
+
+    def mini_program_user_info(self) -> APIResponse[UserInfo]:
+        """Verify the mini-program SESSION and its bound school identity."""
+        return self._http.request(
+            "GET", "/api/auth/user-info", APIResponse[UserInfo], platform_app=True,
+        )
+
     def request_checkin_ticket(self, *, code: str | SecretStr) -> APIResponse[CheckinTicket]:
         """Exchange a caller-provided uni.login code; does not install the ticket.
 
-        Uses this client's origin, SESSION and transport, but the mini-program
-        platform-app endpoint. No WeChat login, renewal or retry is performed.
+        Requires the SESSION returned by check_wechat_bind, not merely a valid
+        H5 SESSION. The code must be fresh, not reused from the binding check.
+        No WeChat login, renewal or retry is performed.
         """
-        request = _CheckinTicketRequest(
+        request = _WechatCodeRequest(
             code=code.get_secret_value() if isinstance(code, SecretStr) else code,
         )
         return self._http.request(

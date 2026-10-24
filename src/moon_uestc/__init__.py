@@ -4,6 +4,15 @@ from .client import DEFAULT_BASE_URL, MoonClient
 from .idas import IDASClient
 from .idas_models import FingerprintComponents, IDASLoginPage, SliderCaptcha, SliderTrack
 from .interactive import login_interactive
+from .wechat import WeChatClient, login_wechat_interactive
+from .wechat_models import (
+    WeChatAuthorizationError,
+    WeChatCredentials,
+    WeChatError,
+    WeChatPollResult,
+    WeChatProtocolError,
+    WeChatQRCode,
+)
 from .errors import (
     APIError,
     AuthenticationError,
@@ -31,5 +40,13 @@ __all__ = [
     "ReauthenticationRequiredError",
     "SliderCaptcha",
     "SliderTrack",
+    "WeChatAuthorizationError",
+    "WeChatClient",
+    "WeChatCredentials",
+    "WeChatError",
+    "WeChatPollResult",
+    "WeChatProtocolError",
+    "WeChatQRCode",
+    "login_wechat_interactive",
     "login_interactive",
 ]

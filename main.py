@@ -5,6 +5,7 @@ from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import time
 
 import httpx2
 from pydantic import (
@@ -18,15 +19,21 @@ from pydantic import (
 
 from moon_uestc import (
     AuthenticationError,
+    AuthorizationError,
+    CheckinTicketError,
     IDASClient,
     MoonClient,
     ReauthenticationRequiredError,
+    WeChatClient,
+    WeChatCredentials,
     login_interactive,
+    login_wechat_interactive,
 )
 from moon_uestc.models import CASCredentials, CheckinRecord, CheckinRequest
 
 IDAS_ORIGIN = "https://idas.uestc.edu.cn"
 SERVICE_URL = "https://jzsz.uestc.edu.cn/"
+WECHAT_APP_ID = "wxaa78bf2905f01cee"
 _MFA_RESPONSE = TypeAdapter(dict[str, JsonValue])
 
 
@@ -216,6 +223,7 @@ class AuthCache(BaseModel):
     user_agent: str = "moon-uestc/0.1"
     castgc: SecretStr | None = None
     session: SecretStr | None = None
+    wechat_credentials: WeChatCredentials | None = None
 
     def update_credentials(self, credentials: CASCredentials) -> None:
         self.castgc = credentials.castgc
@@ -240,6 +248,14 @@ def save_cache(cache: AuthCache) -> None:
         key: value.get_secret_value() if isinstance(value, SecretStr) else value
         for key, value in cache.model_dump().items()
     }
+    if cache.wechat_credentials is not None:
+        credentials = cache.wechat_credentials
+        payload["wechat_credentials"] = {
+            "openid": credentials.openid.get_secret_value(),
+            "access_token": credentials.access_token.get_secret_value(),
+            "refresh_token": credentials.refresh_token.get_secret_value(),
+            "expires_at": credentials.expires_at,
+        }
     with NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
@@ -293,11 +309,45 @@ def exchange(cache: AuthCache) -> None:
     save_cache(cache)
 
 
+def wechat_code() -> SecretStr:
+    cache = load_cache()
+    with WeChatClient() as wechat:
+        credentials = cache.wechat_credentials
+        if credentials is None:
+            credentials = login_wechat_interactive(wechat)
+        elif credentials.expires_at <= time() + 60:
+            credentials = wechat.refresh(credentials)
+        cache.wechat_credentials = credentials
+        # Persist token rotation before the MMTLS call, even if that call fails.
+        save_cache(cache)
+        return wechat.get_code(app_id=WECHAT_APP_ID, credentials=credentials)
+
+
+def checkin_ticket(client: MoonClient) -> SecretStr:
+    expected_user = client.auth.user_info().data.user_data
+    with MoonClient() as bootstrap:
+        binding = bootstrap.auth.check_wechat_bind(code=wechat_code()).data
+    if not binding.bind:
+        raise CheckinTicketError("该微信尚未绑定学校账号，请先在官方小程序完成绑定。")
+    assert binding.session_id is not None
+    try:
+        with MoonClient(session=binding.session_id) as mini_program:
+            user = mini_program.auth.mini_program_user_info().data.user_data
+            if user.id != expected_user.id:
+                raise AuthorizationError("微信绑定的学校账号与当前 H5 账号不同，已停止取票。")
+            # wx.login codes are one-time: check-bind consumed the first one.
+            return mini_program.auth.request_checkin_ticket(code=wechat_code()).data.ticket
+    except AuthenticationError as error:
+        raise CheckinTicketError(
+            "小程序会话未通过验证，请重新登录小程序。",
+            code=error.code,
+            status_code=error.status_code,
+        ) from None
+
+
 def today(session: SecretStr) -> CheckinRecord | None:
     with MoonClient(session=session) as client:
-        ticket = client.auth.request_checkin_ticket(
-            code="0b3768Ha1I3EFM0SitIa1kpFxd2768Hl"
-        ).data.ticket
+        ticket = checkin_ticket(client)
         print(ticket)
         client.set_checkin_ticket(ticket)
 

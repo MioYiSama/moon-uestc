@@ -1,8 +1,8 @@
 # moon-uestc
 
-「晚安成电」学生端 Python 与 Go SDK。Python 3.13+，同步 `httpx2` 客户端，Pydantic 请求/响应模型，包含 `py.typed`；Go 1.23+，只用标准库，见 [`go-sdk/`](go-sdk/README.md)。业务接口只覆盖学生端及学生身份下的班委功能，不含管理接口。Python 另提供独立的统一身份认证 `IDASClient`。
+「晚安成电」学生端 Python 与 Go SDK。Python 3.13+，同步 `httpx2` 客户端，Pydantic 请求/响应模型，包含 `py.typed`；Go 1.23+，只用标准库，见 [`go-sdk/`](go-sdk/README.md)。业务接口只覆盖学生端及学生身份下的班委功能，不含管理接口。Python 另提供独立的统一身份认证 `IDASClient` 和原生微信协议 `WeChatClient`。
 
-契约来自部署的 H5 前端、小程序静态代码及本人账号的只读响应，不是官方公开 API。逆向日期：2026-10-22～23。业务覆盖范围见下表，不含管理接口。
+契约来自部署的 H5 前端、小程序静态代码及本人账号响应，不是官方公开 API。逆向日期：2026-10-22～24。业务覆盖范围见下表，不含管理接口。
 
 ## Python SDK 安装与只读使用
 
@@ -139,7 +139,7 @@ with MoonClient(session=exchanged.session) as client:
 - 要复用浏览器已有的设备信任，应同时使用对应的实际 User-Agent 和指纹，而不是示例中的 SDK User-Agent。
 - `FingerprintComponents(...).digest()` 可根据调用方采集的 UAParser 字段、navigator 属性及 Canvas PNG 字节，复现站点的双层大写 MD5；不会猜测浏览器属性或在 Python 中伪装 Canvas 渲染。
 
-`uv run python main.py` 会在脚本目录的 `.moon-uestc-auth.json` 中缓存 SESSION、CASTGC、设备指纹和 User-Agent，权限为 `0600`，不保存密码。再次运行时直接用 SESSION 查询今日记录；服务端拒绝会话后，先用缓存的 CAS 凭据换取新 SESSION，保存服务端轮换后的凭据。只有缺少 CAS 凭据或明确要求重新认证时才提示输入账号密码；网络故障和权限不足不会触发重新登录。指纹在交互登录前保存，取消登录后仍可复用。缓存使用临时文件原子替换，已加入 `.gitignore`，但内容仍是明文登录凭据，不要分享或提交。需要切换账号时删除该文件；这只清除本地缓存，不注销服务端会话。以上逻辑仅在 `main.py`，SDK 的认证行为不变。
+`main.py` 在脚本目录的 `.moon-uestc-auth.json` 中缓存 SESSION、CASTGC、设备指纹、User-Agent 和微信授权凭据，权限为 `0600`，不保存密码、一次性 code 或操作票据。服务端拒绝 SESSION 后，先用缓存的 CAS 凭据换会话并保存轮换凭据；只有缺少 CAS 凭据或明确要求重新认证时才提示输入账号密码。网络故障和权限不足不会触发重新登录。指纹在交互登录前保存，取消后仍可复用。缓存使用临时文件原子替换，已加入 `.gitignore`，但仍是明文凭据，不要分享或提交。删除缓存可切换账号；这不注销服务端会话。注意：当前 `uv run python main.py` 会取微信 code、换操作票据并执行脚本中已有的签到请求，不再只是读取今日记录；运行前确认脚本里的定位信息。SDK 本身不自动登录或签到。
 
 遇到 `/authserver/reAuthCheck/reAuthLoginView.do` 时，`main.py` 会读取官方页面提供的认证方式；提供短信方式时，在同一 Cookie 会话内切换认证、等待用户确认发信，再读取隐藏输入的短信验证码。可选择“信任此设备”（默认不信任）；短信和密码均不写入缓存。验证后继续原 CAS 跳转，只有平台登录检查和身份校验都通过才保存 SESSION。验证码被拒绝时不会改为重复密码登录；没有短信方式时需在官方页面完成认证。此流程使用 SDK 的自定义 transport 接口，不修改 SDK。
 
@@ -239,28 +239,52 @@ next_credentials = exchanged.credentials
 
 `checkin`、`report` 除登录身份外还使用 `X-Checkin-Ticket`。票据由后端签发，不是客户端本地计算的签名。小程序将票据通过 URL 的普通 query 或 hash query 参数 `checkinTicket` 交给 H5，H5 存入 `sessionStorage["daily-checkin-operation-ticket"]` 后从地址栏移除。
 
-Python 使用 `auth.request_checkin_ticket(code=...)` 显式获取票据：
+取票前必须先登录小程序。H5 `SESSION` 与小程序 `SESSION` 不能互相替代：先用一个新 code 请求 `check-bind`，拿返回的 `sessionId` 读取小程序用户信息；确认与 H5 是同一学校账号后，再用另一个新 code 换票。
 
 ```python
 import os
 
-from moon_uestc import MoonClient
+from moon_uestc import MoonClient, WeChatClient, login_wechat_interactive
 
-# 调用方在官方小程序环境执行 uni.login({provider: "weixin"})，取得真实 code。
-# SDK 不执行微信登录；请勿使用 IDAS 登录凭据或 SESSION 代替该 code。
-with MoonClient(session=os.environ["MOON_SESSION"]) as client:
-    response = client.auth.request_checkin_ticket(code=os.environ["MOON_WECHAT_CODE"])
+with MoonClient(session=os.environ["MOON_SESSION"]) as client, WeChatClient() as wechat:
+    expected_id = client.auth.user_info().data.user_data.id
+    credentials = login_wechat_interactive(wechat)
+    with MoonClient() as bootstrap:
+        binding = bootstrap.auth.check_wechat_bind(
+            code=wechat.get_code(app_id="wxaa78bf2905f01cee", credentials=credentials)
+        ).data
+    if not binding.bind:
+        raise RuntimeError("请先在官方小程序完成学校账号绑定")
+    assert binding.session_id is not None
+    with MoonClient(session=binding.session_id) as mini_program:
+        user = mini_program.auth.mini_program_user_info().data.user_data
+        if user.id != expected_id:
+            raise RuntimeError("微信绑定账号与 H5 账号不同")
+        response = mini_program.auth.request_checkin_ticket(
+            code=wechat.get_code(app_id="wxaa78bf2905f01cee", credentials=credentials)
+        )
     client.set_checkin_ticket(response.data.ticket)
     # 此后 client.student.checkin(...) / report(...) 才携带返回的票据。
 ```
 
-- 请求为同源 `POST /platform-app/api/auth/checkin-ticket`，JSON `{"code": code}`，请求头 `platform: mp-weixin`；复用当前连接池、超时及 SESSION Cookie。自定义 `base_url` 只影响取票的 origin，不将 `/daily-checkin` 或自定义业务前缀拼进取票路径。普通业务请求仍使用原 `base_url` 和 `platform: h5`。
+- 小程序认证均使用同源 `/platform-app` 和 `platform: mp-weixin`。`POST /api/auth/check-bind` 提交 `{"code": code, "sn": ""}`；返回 `WeChatBindResult`，其中 `session_id`、`authorize_url` 是 `SecretStr`。该方法不安装返回的 sessionId，应以独立客户端承载小程序会话。未绑定时须通过官方流程完成授权，SDK 不擅自绑定学校账号。
+- 取票为 `POST /platform-app/api/auth/checkin-ticket`，JSON `{"code": code}`，必须带小程序 SESSION。自定义 `base_url` 只影响 origin，不将业务路径前缀拼进小程序认证路径。普通业务请求仍使用原 `base_url`、H5 SESSION 和 `platform: h5`。
 - 原始响应必须为 `ok: true`，不能只凭 H5 的 `code: 0` 或 `status: true` 判定成功。`data.ticket` 必须恰好为 43 位 `[A-Za-z0-9_-]` 字符，否则抛 `ProtocolError`；这不证明其生成算法或有效期。
 - 返回 `APIResponse[CheckinTicket]`，其中 `.data.ticket` 为 `SecretStr`，常规 repr/JSON 遮蔽。获取成功或失败都不会自动安装或替换当前票据；需要时显式调用 `set_checkin_ticket(...)`，传 `None` 清除。已有有效票据也可直接传给 `MoonClient(checkin_ticket=...)`。
 - 登录 Cookie 不等于操作授权；SDK 无法仅凭 SESSION、账号密码或 CAS 凭据生成微信 code。没有票据时，提交在联网前抛 `CheckinTicketError`。服务端返回 `46001`、`46002`、`46003` 时也映射为该异常；各码的精确含义未验证。
-- 前端遇到票据错误会清票并要求回到小程序重新授权。SDK 不伪造票据，不自动重新登录、续票或重试取票/业务写入。线上签发、打卡和填报未实测。
+- 前端遇到票据错误会清票并要求回到小程序重新授权。SDK 不伪造票据，不自动重新登录、续票或重试取票/业务写入。Python 已线上实测签发操作票据，未提交签到或填报。
 
-微信 code 的获取尚未集成。离线包中的 `uni.login` 依赖微信运行时，仅有解包 JavaScript 和 AppID 不能执行真实登录。官方 [`wx.login`](https://developers.weixin.qq.com/miniprogram/dev/api/open-api/login/wx.login.html) 在对应小程序环境返回 code；如具备目标 AppID 的开发权限和可运行工程，可通过官方 [`miniprogram-automator.callWxMethod`](https://developers.weixin.qq.com/miniprogram/dev/devtools/auto/miniprogram.html#miniProgram-callWxMethod) 调用。当前缺少该运行环境，SDK 没有用回调占位、其他 AppID 的 code 或本地随机字符串替代真实获取。
+Python 原生取码逻辑参考 [YYB-Go-Enhanced](https://github.com/525815266/YYB-Go-Enhanced/tree/8a9497397abc7bf736be462f2e293f2bc6d4d0c0)：微信 QR Connect 扫码 → 应用宝 OAuth 凭据 → 签名请求 `login_buffer` → MMTLS 握手与 ManualAuth → 0-RTT `js-login`。不需要 Go 运行时、外部 YYB 服务或小程序开发权限；仍必须用本人微信完成真实授权，目标小程序是否接受该账号由微信和业务服务决定。目标 AppID 为 `wxaa78bf2905f01cee`；应用宝的 `wxd44977328b36e647` 仅用于扫码授权，不能替代目标 AppID。
+
+- `WeChatClient.create_qr()` 返回 `WeChatQRCode(uuid, image)`；`poll_qr(uuid)` 返回待扫码、已扫码、授权、取消或过期状态。`exchange_code(...)` 兑换的是扫码 OAuth code，不是小程序 code。回调新签发且适用于回调地址的 `openid`、`accesstoken` 齐全后即完成凭据交换，即使该响应为 302 也不访问落地页；未取得凭据时只允许同源 HTTPS 跳转。每次交换单独收集回调 Cookie，不能混用旧账号或错误路径的 Cookie。`login_wechat_interactive()` 封装终端图片展示与轮询，需交互终端和真彩色支持；Ctrl-C 取消。
+- `get_code(app_id=..., credentials=...) -> SecretStr` 每次向微信请求新 code，不缓存、不重放。取码失败不会自动重扫、刷新或重试签到。空或空白协议 code 会被拒绝；请求模型也在联网前拒绝空 code。排查时只输出 `len(code.get_secret_value())`，不要打印 code 明文。`refresh(credentials)` 显式刷新应用宝凭据，接受实测的字符串秒数 `expires_in: "7200"`；调用方自行安全保存轮换凭据。微信错误使用独立的 `WeChatError` / `WeChatAuthorizationError` / `WeChatProtocolError`，不会误触发 CAS 重登。
+- 微信客户端不接收学校 SESSION、CASTGC、指纹或操作票据，HTTP Cookie jar 与学校客户端隔离。`transport=` 只作用于扫码/应用宝 HTTP；取码协议阶段直接连接微信 TCP 服务，不提供代理配置。`timeout=` 限制协议阶段的总时间；二维码状态使用最长 40 秒的单次长轮询。
+- `main.py` 首次显示微信二维码；之后复用缓存凭据，距过期不足 60 秒时显式刷新并先保存轮换结果。取票按 H5 身份检查 → 新 code 登录小程序 → 小程序身份比对 → 第二个新 code 换票执行；不会复用登录 code，也不会把小程序会话覆盖进 H5 缓存。未绑定、身份不符或小程序会话被拒绝时停止，不误触发 CAS 重登。refresh token 被拒绝时也停止；重新授权时仅清除缓存中的 `wechat_credentials` 字段。
+- 只运行扫码与取码、不执行签到：`uv run python -c 'from main import wechat_code; print(wechat_code())'`。输出的 `SecretStr` 为掩码；取码后应立即换票，不能复用上一轮 code。普通 `main.py` 则继续原有签到流程。
+- 只验证完整授权、不提交签到：`uv run python -c 'from main import load_cache, checkin_ticket; from moon_uestc import MoonClient; c=MoonClient(session=load_cache().session); print(checkin_ticket(c)); c.close()'`。需要有效 H5 SESSION；普通 `main.py` 则会按原有逻辑续会话并继续签到。
+
+已使用缓存的本人微信授权凭据实测取码 → `check-bind(bind=true)` → 小程序用户信息 → 第二次取码 → 学校签发操作票据。两次 code 均为 32 字符且非空，票据为 43 字符。未输出 code、sessionId、票据明文，也未提交签到或填报。先前空值报告的原因尚未确定；这次实测仅证明当前链路返回非空 code。
+
 
 ### 角色和业务约束
 
@@ -270,13 +294,15 @@ with MoonClient(session=os.environ["MOON_SESSION"]) as client:
 
 ## 学生接口清单
 
-除头像和取票外，以下路径都相对于 `https://jzsz.uestc.edu.cn/daily-checkin`；取票路径相对于同源 origin。表中的“实测”仅指真实只读调用，不包括业务写操作。
+除头像和小程序认证外，以下路径都相对于 `https://jzsz.uestc.edu.cn/daily-checkin`；小程序认证路径相对于同源 origin。认证实测不包含签到、填报等业务写操作。
 
 | SDK 方法 | HTTP 与路径 | 参数或请求体 | 返回 `.data` | 验证范围 |
 | --- | --- | --- | --- | --- |
 | `auth.user_info()` | GET `/api/auth/user-info` | 可选 `sessionId` | `UserInfo` | SESSION 与匿名行为已实测；sessionId 分支未测 |
 | `auth.service_account_subscribed()` | GET `/api/user/service-account-subscribed` | 无 | `bool` | 已实测 |
-| `auth.request_checkin_ticket(code=...)` | POST `/platform-app/api/auth/checkin-ticket`（同源） | `{"code": "uni.login 返回值"}` | `CheckinTicket`，`.ticket` 为 `SecretStr` | 小程序契约；本地 HTTP 验证，未调用线上签发 |
+| `auth.check_wechat_bind(code=...)` | POST `/platform-app/api/auth/check-bind` | `{"code": "新 code", "sn": ""}` | `WeChatBindResult` | 已实测已绑定账号及 sessionId 签发；未实测未绑定授权 |
+| `auth.mini_program_user_info()` | GET `/platform-app/api/auth/user-info` | 小程序 SESSION | `UserInfo` | 已实测 |
+| `auth.request_checkin_ticket(code=...)` | POST `/platform-app/api/auth/checkin-ticket` | 小程序 SESSION、`{"code": "另一个新 code"}` | `CheckinTicket`，`.ticket` 为 `SecretStr` | 已实测签发 |
 | `student.effective_schedule()` | GET `/api/checkin-schedule/effective` | 无 | `CheckinSchedule \| None` | 已实测 |
 | `student.available_locations()` | GET `/api/checkin-location/available-locations` | 无 | `list[CheckinLocation]` | 已实测 |
 | `student.campus_fences()` | GET `/api/campus-fence/current-student` | 无 | `list[CampusFence]` | 已实测 |
@@ -310,6 +336,7 @@ with MoonClient(session=os.environ["MOON_SESSION"]) as client:
 ### 类型边界
 
 - `CheckinRecord.instructor_list` 同时接受服务端的 JSON 字符串、数组及 null，并返回 `list[InstructorContact]`。旧的单联系人字段 `instructor_sn/name/phone` 仍作为服务端原始字段保留，不合成额外联系人。
+- 小程序用户信息中实测 `userData.ability` 和 `roles[].permissions` 可为 null；SDK 按空权限列表返回，不因此授予权限，其余非列表结构仍按错误处理。
 - ID 保留字符串；分页中的字符串计数转为 Python `int`，不经过浮点数。
 - 响应保留新增字段，可通过 Pydantic 的 `model_extra` 访问。字段类型不匹配会抛 `ProtocolError`，而不是返回未校验的字典。
 - 真实样本无法确定的免打卡详情、学生标签内部结构、异常追踪内容和写操作结果明确使用 `JsonValue`，不声称这些部分已经有完整结构定义。写操作若成功但省略 `data`，SDK 将其视为 `None`。
@@ -371,6 +398,12 @@ IDAS SDK 阶段已有 36 个回归测试通过，新增 14 项覆盖设备标识
 
 命令行阶段已有 58 个 Python 回归测试通过，包含终端输入、换题、取消、无移动不提交、服务端拒绝、同会话验证码续交、密码不自动重试，以及凭据文件权限与防覆盖。该阶段严格类型检查无错误，公开类型完整性为 100%；安装后的 `moon-uestc login --help` 与 `uv build` 均已运行。
 
-2026-10-23 增加显式微信 code 换操作票据。Python 当前 62 个回归测试通过，严格类型检查无错误，公开类型完整性为 100%；Go 通过 `gofmt`、`go vet ./...` 和 `go test -race ./... -count=1 -v`。两个 SDK 均以本地真实 HTTP 服务验证取票 → 显式设置票据 → 打卡/填报协议，包括 SESSION、`mp-weixin`/`h5` 请求隔离、自定义业务前缀、只有 `ok: true` 的成功响应、`ok: false` 不接受 `code: 0`、失败不替换旧票据及不重试。没有调用线上签发、打卡或填报接口；完整微信取 code 流程因缺少目标小程序运行环境未实现、未验证。
+2026-10-23 增加显式微信 code 换操作票据。取票阶段 62 个 Python 回归测试通过，严格类型检查无错误，公开类型完整性为 100%；Go 通过 `gofmt`、`go vet ./...` 和 `go test -race ./... -count=1 -v`。两个 SDK 均以本地真实 HTTP 服务验证取票 → 显式设置票据 → 打卡/填报协议，包括 SESSION、`mp-weixin`/`h5` 请求隔离、自定义业务前缀、只有 `ok: true` 的成功响应、`ok: false` 不接受 `code: 0`、失败不替换旧票据及不重试。该阶段没有调用线上签发、打卡或填报接口；当时尚未实现微信取码，现已补充上述 Python 原生协议入口。
 
 `main.py` 的短信二次认证依据部署的 [reAuth.js](https://idas.uestc.edu.cn/authserver/uestcTheme/static/custom/js/reAuth.js?v=20260910.204435) 实现。使用已有 CAS 凭据实测确认了业务级二次认证页、短信方式可用及服务端切换响应；新脚本已在线运行至发送验证码前的确认提示，随后取消，没有发送真实短信或提交真实验证码。完整密码登录 → 短信认证 → 平台会话校验 → 缓存复用已用真实 PTY 和模拟 HTTP transport 验证，另有 6 项回归覆盖 Cookie 轮换、拒绝验证码、不自动信任设备、认证方式限制和目标业务校验；这不等于真实短信验证已通过。
+
+2026-10-24 补充原生微信取码。92 个 Python 回归测试通过，严格类型检查无错误，公开类型完整性 100%。14 组固定输入的 ClientHello、PSK ClientHello、密钥派生、Finished、记录密文、js-login、WPKG 和 LZ4 输出与参考 Go 实现逐字节一致。真实微信二维码和 MMTLS 握手已执行，终端扫码提示显示后主动取消；未发送账号凭据或提交签到。另以 socketpair 中的加密对端验证双方 Finished 使用同一份 ServerFinished 之前的 transcript，回归覆盖修复前拒绝、修复后通过；合成加密响应覆盖 0-RTT 解密、业务拒绝及缺少 code。OAuth Cookie 作用域、签名、token 轮换与私有缓存也有回归覆盖。真人扫码后的 ManualAuth → code → 学校换票尚未线上验证。
+
+OAuth 回调修复：回调已签发凭据后的跨站落地页跳转不再导致授权失败，也不会被访问。95 个 Python 回归测试通过，严格类型检查无错误；新增回归覆盖 302 携带凭据、同源中间跳转，以及旧凭据与错误作用域 Cookie 不得混用。本地真实 HTTP 场景验证了 302 回调 → 凭据读取 → 签名请求 login_buffer，未访问落地页；没有重新执行真人扫码或线上取码。
+
+小程序登录前置流程修复：原小程序 `pages/login/login.js:18–46` 先调用 `POST /api/auth/check-bind`，把返回的 sessionId 作为 SESSION 使用；取票工具随后重新调用微信登录取得另一个 code。新增 Python `check_wechat_bind()`、`mini_program_user_info()`，`main.py` 隔离两类 SESSION 并核对学校身份。103 项测试、严格类型检查和公开类型完整性 100% 均通过，覆盖未绑定、缺少 sessionId、账号不符、小程序认证失败不重登 CAS、空 code 拒绝及 null 权限列表。本人账号已在线取得 43 字符操作票据，未提交签到；凭据刷新还实测并兼容了字符串 `expires_in`。静态证据 `ev_e4c8cbacfe82fed319e15853bc94815b161ff7a64978aa698d4280edad5d2b10` 仅分析登录、用户 API/store、请求拦截和取票这五个模块，不代表完整小程序覆盖。

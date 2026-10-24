@@ -91,16 +91,24 @@ func main() {
 
 `Student.Checkin` 和 `Student.Report` 需要独立的 `X-Checkin-Ticket`，它与登录 Cookie 是两套授权。可以显式调用 `Auth.RequestCheckinTicket(ctx, code)`，用调用方在官方目标 AppID 的实际小程序运行时执行 `uni.login({provider: "weixin"})` 获得的 `code` 换取票据；仅有解包的静态 bundle 无法取得该 code。SDK 不调用 `uni.login`。
 
+取票请求必须携带小程序登录产生的 SESSION，只有 H5 SESSION 会被后端提示“请先登录小程序”。官方流程先用一个 code 请求 `POST /platform-app/api/auth/check-bind`（`sn: ""`），随后用返回的 `data.sessionId` 和另一个新 code 换票。Go SDK 尚未封装 check-bind 或原生微信取码；下例要求调用方已取得小程序 SESSION。Python 已支持完整显式流程，见根目录 README。
+
 ```go
-client, err := moonuestc.NewClient(moonuestc.Options{
-	Session: os.Getenv("MOON_SESSION"),
+miniProgram, err := moonuestc.NewClient(moonuestc.Options{
+	Session: os.Getenv("MOON_MINI_PROGRAM_SESSION"),
 })
 if err != nil {
 	panic(err)
 }
 
 loginCode := os.Getenv("MOON_WECHAT_LOGIN_CODE") // 由调用方从 uni.login(...) 获得
-ticketResponse, err := client.Auth.RequestCheckinTicket(ctx, loginCode)
+ticketResponse, err := miniProgram.Auth.RequestCheckinTicket(ctx, loginCode)
+if err != nil {
+	panic(err)
+}
+client, err := moonuestc.NewClient(moonuestc.Options{
+	Session: os.Getenv("MOON_SESSION"), // 业务请求仍使用 H5 SESSION
+})
 if err != nil {
 	panic(err)
 }

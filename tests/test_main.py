@@ -159,10 +159,16 @@ class MainAuthenticationTests(unittest.TestCase):
         def idas_client(*, user_agent: str) -> IDASClient:
             return IDASClient(user_agent=user_agent, transport=httpx2.MockTransport(self.flow))
 
+        def read_today(session: SecretStr) -> None:
+            # Exercise the authenticated session without executing main's checkin.
+            with business_client(session=session) as client:
+                client.student.today()
+
         patches = [
             patch.object(main, "MoonClient", side_effect=business_client),
             patch.object(main, "MFAExchangeTransport", side_effect=exchange_transport),
             patch.object(main, "IDASClient", side_effect=idas_client),
+            patch.object(main, "today", side_effect=read_today),
             patch.object(main, "login_interactive", side_effect=AssertionError("must not repeat password login for MFA")),
         ]
         for mock_patch in patches:

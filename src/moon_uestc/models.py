@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from enum import StrEnum
 from re import fullmatch
-from typing import Annotated, ClassVar, Literal
+from typing import Annotated, ClassVar, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -19,6 +19,7 @@ from pydantic import (
     SecretStr,
     field_serializer,
     field_validator,
+    model_validator,
 )
 from pydantic.alias_generators import to_camel
 
@@ -82,6 +83,11 @@ class Role(APIModel):
     role_group_id: str | None = None
     permissions: list[Permission] = Field(default_factory=list[Permission])
 
+    @field_validator("permissions", mode="before")
+    @classmethod
+    def empty_permissions(cls, value: object) -> object:
+        return [] if value is None else value
+
 
 class UserData(APIModel):
     id: str
@@ -98,11 +104,38 @@ class UserData(APIModel):
     college_sns: list[str] = Field(default_factory=list)
     token: SecretStr | None = None
 
+    @field_validator("ability", mode="before")
+    @classmethod
+    def empty_ability(cls, value: object) -> object:
+        return [] if value is None else value
+
 
 class UserInfo(APIModel):
     user_data: UserData
     access_token: SecretStr | None = None
     refresh_token: SecretStr | None = None
+
+
+class WeChatBindResult(APIModel):
+    """Mini-program login result; SESSION is distinct from the H5 session."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(hide_input_in_errors=True)
+    bind: bool = Field(strict=True)
+    session_id: SecretStr | None = None
+    authorize_url: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def validate_bound_session(self) -> Self:
+        if self.bind and self.session_id is None:
+            raise ValueError("A bound WeChat login must include sessionId")
+        if self.session_id is not None:
+            value = self.session_id.get_secret_value()
+            if not value or any(
+                ord(char) <= 0x20 or ord(char) >= 0x7F or char in '";,\\'
+                for char in value
+            ):
+                raise ValueError("sessionId must be a non-empty HTTP cookie value")
+        return self
 
 
 class CheckinTicket(APIModel):
